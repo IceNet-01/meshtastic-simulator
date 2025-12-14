@@ -562,6 +562,9 @@ async function loadConfig() {
         document.getElementById('pathloss-model').value = state.config.model;
         document.getElementById('area-width').value = state.config.xsize;
         document.getElementById('area-height').value = state.config.ysize;
+        if (state.config.pathLossAdjustment !== undefined) {
+            document.getElementById('pathloss-adjustment').value = state.config.pathLossAdjustment;
+        }
     } catch (error) {
         log('Failed to load config', 'error');
     }
@@ -2242,14 +2245,15 @@ function applySettings() {
     const model = parseInt(document.getElementById('pathloss-model').value);
     const width = parseInt(document.getElementById('area-width').value);
     const height = parseInt(document.getElementById('area-height').value);
+    const pathLossAdjustment = parseFloat(document.getElementById('pathloss-adjustment').value);
 
     fetch('/api/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model, xsize: width, ysize: height })
+        body: JSON.stringify({ model, xsize: width, ysize: height, pathLossAdjustment })
     }).then(() => {
         log('Settings applied', 'success');
-        loadNodes(); // Recalculate coverage
+        loadNodes(); // Recalculate coverage and links
     }).catch(() => {
         log('Failed to apply settings', 'error');
     });

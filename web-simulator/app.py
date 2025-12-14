@@ -65,6 +65,10 @@ class WebSimulatorConfig(Config):
         # Smaller default area for web visualization
         self.XSIZE = 10000  # 10km x 10km area
         self.YSIZE = 10000
+        # Path loss adjustment in dB (negative values increase range)
+        # Default -15 dB gives ~5km range with 2m height instead of ~2km
+        # Real-world Meshtastic typically achieves 3-8km in suburban areas
+        self.PATH_LOSS_ADJUSTMENT = -15.0
 
     def to_dict(self) -> dict:
         """Convert config to JSON-serializable dict."""
@@ -77,6 +81,7 @@ class WebSimulatorConfig(Config):
             'defaultGain': self.GL,
             'region': 'US',
             'modem': self.MODEM,
+            'pathLossAdjustment': self.PATH_LOSS_ADJUSTMENT,
             'pathlossModels': [
                 {'id': 0, 'name': 'Log-distance'},
                 {'id': 1, 'name': 'Okumura-Hata (small/medium cities)'},
@@ -230,7 +235,9 @@ class WebSimulator:
     def calculate_link_quality(self, node1: SimulatorNode, node2: SimulatorNode) -> dict:
         """Calculate link quality between two nodes."""
         dist = np.sqrt((node1.x - node2.x)**2 + (node1.y - node2.y)**2 + (node1.z - node2.z)**2)
-        path_loss = phy.estimate_path_loss(self.config, dist, self.config.FREQ, node1.z, node2.z)
+        base_path_loss = phy.estimate_path_loss(self.config, dist, self.config.FREQ, node1.z, node2.z)
+        # Apply path loss adjustment (negative values reduce path loss, increasing range)
+        path_loss = base_path_loss + self.config.PATH_LOSS_ADJUSTMENT
         rssi = self.config.PTX + node1.antenna_gain - path_loss
         snr = rssi - self.config.NOISE_LEVEL
         can_receive = bool(rssi >= self.config.SENSMODEM[self.config.MODEM])
@@ -419,6 +426,13 @@ def update_config():
             simulator.config.GL = gain
         else:
             errors.append('defaultGain must be between -20 and 30 dBi')
+
+    if 'pathLossAdjustment' in data:
+        adjustment = float(data['pathLossAdjustment'])
+        if -30 <= adjustment <= 30:
+            simulator.config.PATH_LOSS_ADJUSTMENT = adjustment
+        else:
+            errors.append('pathLossAdjustment must be between -30 and 30 dB')
 
     if errors:
         return jsonify({'status': 'error', 'errors': errors, 'config': simulator.config.to_dict()}), 400
