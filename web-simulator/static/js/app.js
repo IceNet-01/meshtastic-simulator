@@ -48,6 +48,53 @@ const state = {
 const TILE_SERVER = 'https://tile.openstreetmap.org';
 const METERS_PER_DEGREE_LAT = 111320; // Approximate meters per degree latitude
 
+// Render loop state
+let renderLoopRunning = false;
+let lastRenderTime = 0;
+
+/**
+ * Restart the render loop for active animations.
+ * Called when tab becomes visible or window gains focus to ensure
+ * animations continue smoothly after being throttled.
+ */
+function startRenderLoop() {
+    if (!state.animation.active) {
+        renderLoopRunning = false;
+        return;
+    }
+
+    // Force a render immediately to update the display
+    render();
+
+    renderLoopRunning = true;
+    lastRenderTime = performance.now();
+
+    // Restart the appropriate animation based on type
+    switch (state.animation.type) {
+        case 'broadcast':
+            requestAnimationFrame(animateBroadcast);
+            break;
+        case 'dm':
+            // Check if using flood or path-based animation
+            if (state.animation.data.propagation && state.animation.data.propagation.length > 0) {
+                requestAnimationFrame(animateDMFlood);
+            } else {
+                requestAnimationFrame(animateDM);
+            }
+            break;
+        case 'traceroute':
+            // Check if using flood or path-based animation
+            if (state.animation.data.propagation && state.animation.data.propagation.length > 0) {
+                requestAnimationFrame(animateTracerouteFlood);
+            } else {
+                requestAnimationFrame(animateTraceroute);
+            }
+            break;
+        default:
+            renderLoopRunning = false;
+    }
+}
+
 // ============== Initialization ==============
 document.addEventListener('DOMContentLoaded', () => {
     console.log('Meshtastic Web Simulator initializing...');
@@ -94,6 +141,21 @@ document.addEventListener('DOMContentLoaded', () => {
     } else {
         render();
     }
+
+    // Handle visibility changes - restart render loop when tab becomes visible
+    document.addEventListener('visibilitychange', () => {
+        if (!document.hidden && state.animation.active) {
+            console.log('Tab visible, restarting render loop');
+            startRenderLoop();
+        }
+    });
+
+    // Also handle window focus
+    window.addEventListener('focus', () => {
+        if (state.animation.active) {
+            startRenderLoop();
+        }
+    });
 
     console.log('Initialization complete');
 });
@@ -835,6 +897,11 @@ function getRoleColor(role, alpha = 1) {
 
 // ============== Canvas Event Handlers ==============
 function handleCanvasClick(e) {
+    // If animation is active, ensure render loop is running
+    if (state.animation.active) {
+        startRenderLoop();
+    }
+
     // Don't process click if we just finished dragging a node
     if (state.dragMode === 'node') {
         return;
@@ -1323,6 +1390,7 @@ function startBroadcastAnimation(simulation) {
     });
 
     // Start animation loop
+    renderLoopRunning = true;
     requestAnimationFrame(animateBroadcast);
 }
 
@@ -1390,6 +1458,7 @@ function animateBroadcast(timestamp) {
         setTimeout(() => {
             state.animation.active = false;
             state.animation.packets = [];
+            renderLoopRunning = false;
             render();
         }, 1000);
     }
@@ -1433,14 +1502,17 @@ function startDMAnimation(simulation) {
             });
         }
 
+        renderLoopRunning = true;
         requestAnimationFrame(animateDMFlood);
     } else if (simulation.delivered && simulation.hops && simulation.hops.length > 0) {
         // Fallback to old path-based animation
         state.highlightedRoute = simulation.path || [];
+        renderLoopRunning = true;
         requestAnimationFrame(animateDM);
     } else {
         log(`DM failed - ${simulation.reason || 'no route available'}`, 'error');
         state.animation.active = false;
+        renderLoopRunning = false;
     }
 }
 
@@ -1516,6 +1588,7 @@ function animateDMFlood(timestamp) {
             state.animation.active = false;
             state.animation.packets = [];
             state.highlightedRoute = null;
+            renderLoopRunning = false;
             render();
         }, 2000);
     }
@@ -1566,6 +1639,7 @@ function animateDM(timestamp) {
     } else {
         state.animation.active = false;
         state.animation.packets = [];
+        renderLoopRunning = false;
         // Keep route highlighted a bit longer
         setTimeout(() => {
             state.highlightedRoute = null;
@@ -1610,8 +1684,10 @@ function startTracerouteAnimation(simulation) {
                 });
             });
         }
+        renderLoopRunning = true;
         requestAnimationFrame(animateTracerouteFlood);
     } else {
+        renderLoopRunning = true;
         requestAnimationFrame(animateTraceroute);
     }
 }
@@ -1683,6 +1759,7 @@ function animateTracerouteFlood(timestamp) {
             state.animation.active = false;
             state.animation.packets = [];
             state.highlightedRoute = null;
+            renderLoopRunning = false;
             render();
         }, 3000);
     }
@@ -1747,6 +1824,7 @@ function animateTraceroute(timestamp) {
     } else {
         state.animation.active = false;
         state.animation.packets = [];
+        renderLoopRunning = false;
         // Keep final route visible
         state.highlightedRoute = simulation.path;
         render();
