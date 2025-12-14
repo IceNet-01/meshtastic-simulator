@@ -13,7 +13,9 @@
         <header class="app-header">
             <h1>Meshtastic Network Simulator</h1>
             <div class="header-actions">
-                <button id="btn-import-nodedb" class="btn btn-primary">Import NodeDB</button>
+                <button id="btn-save-scenario" class="btn btn-primary">Save Scenario</button>
+                <button id="btn-load-scenario" class="btn btn-secondary">Load Scenario</button>
+                <button id="btn-import-nodedb" class="btn btn-secondary">Import NodeDB</button>
                 <button id="btn-export" class="btn btn-secondary">Export YAML</button>
                 <button id="btn-import" class="btn btn-secondary">Import YAML</button>
                 <button id="btn-clear" class="btn btn-danger">Clear All</button>
@@ -30,7 +32,13 @@
                         <label for="node-name">Name</label>
                         <input type="text" id="node-name" placeholder="Node name">
                     </div>
-                    <div class="form-row">
+                    <div class="form-group">
+                        <label class="toggle-label">
+                            <input type="checkbox" id="use-gps-coords">
+                            Use GPS Coordinates
+                        </label>
+                    </div>
+                    <div id="coord-xy" class="form-row">
                         <div class="form-group">
                             <label for="node-x">X (m)</label>
                             <input type="number" id="node-x" value="0" step="100">
@@ -38,6 +46,16 @@
                         <div class="form-group">
                             <label for="node-y">Y (m)</label>
                             <input type="number" id="node-y" value="0" step="100">
+                        </div>
+                    </div>
+                    <div id="coord-gps" class="form-row hidden">
+                        <div class="form-group">
+                            <label for="node-lat">Latitude</label>
+                            <input type="number" id="node-lat" value="0" step="0.0001" placeholder="40.7128">
+                        </div>
+                        <div class="form-group">
+                            <label for="node-lon">Longitude</label>
+                            <input type="number" id="node-lon" value="0" step="0.0001" placeholder="-74.0060">
                         </div>
                     </div>
                     <div class="form-row">
@@ -121,6 +139,36 @@
                 </div>
 
                 <div class="panel-section">
+                    <h2>Channel Configuration</h2>
+                    <div class="form-group">
+                        <label for="channel-name">Channel Name</label>
+                        <input type="text" id="channel-name" value="Default" placeholder="Channel name">
+                    </div>
+                    <div class="form-group">
+                        <label for="channel-psk">Pre-Shared Key</label>
+                        <div class="input-with-button">
+                            <select id="channel-psk-type">
+                                <option value="none">None (Open)</option>
+                                <option value="default" selected>Default Key</option>
+                                <option value="random">Random (256-bit)</option>
+                                <option value="custom">Custom</option>
+                            </select>
+                        </div>
+                        <input type="text" id="channel-psk-custom" class="hidden" placeholder="Base64 encoded key">
+                    </div>
+                    <div class="form-group">
+                        <label>
+                            <input type="checkbox" id="channel-encryption-enabled" checked>
+                            Encryption Enabled
+                        </label>
+                    </div>
+                    <div class="encryption-status" id="encryption-status">
+                        <span class="status-icon encrypted">&#128274;</span>
+                        <span class="status-text">Messages are encrypted</span>
+                    </div>
+                </div>
+
+                <div class="panel-section">
                     <h2>Commands</h2>
                     <div class="command-section">
                         <h3>Broadcast</h3>
@@ -176,6 +224,49 @@
                     <h2>Link Quality</h2>
                     <div id="link-info" class="link-info">
                         <p class="hint">Select two nodes to see link quality</p>
+                    </div>
+                </div>
+
+                <div class="panel-section">
+                    <h2>Network Statistics <button id="btn-refresh-stats" class="btn-icon" title="Refresh">&#8635;</button></h2>
+                    <div id="network-stats" class="stats-panel">
+                        <div class="stat-row">
+                            <span class="stat-label">Nodes:</span>
+                            <span id="stat-total-nodes" class="stat-value">0</span>
+                        </div>
+                        <div class="stat-row">
+                            <span class="stat-label">Connectivity:</span>
+                            <span id="stat-connectivity" class="stat-value">0%</span>
+                        </div>
+                        <div class="stat-row">
+                            <span class="stat-label">Avg Hops:</span>
+                            <span id="stat-avg-hops" class="stat-value">0</span>
+                        </div>
+                        <div class="stat-row">
+                            <span class="stat-label">Network Diameter:</span>
+                            <span id="stat-diameter" class="stat-value">0</span>
+                        </div>
+                        <div class="stat-row">
+                            <span class="stat-label">Avg SNR:</span>
+                            <span id="stat-avg-snr" class="stat-value">0 dB</span>
+                        </div>
+                        <div class="stat-row">
+                            <span class="stat-label">Coverage Area:</span>
+                            <span id="stat-coverage" class="stat-value">0 km²</span>
+                        </div>
+                        <div class="stat-group">
+                            <span class="stat-label">Links:</span>
+                            <div class="link-quality-bars">
+                                <div class="quality-bar good" id="stat-links-good" title="Good quality"></div>
+                                <div class="quality-bar medium" id="stat-links-medium" title="Medium quality"></div>
+                                <div class="quality-bar poor" id="stat-links-poor" title="Poor quality"></div>
+                            </div>
+                            <span id="stat-links-total" class="stat-value">0</span>
+                        </div>
+                        <div id="isolated-nodes-warning" class="warning-box hidden">
+                            <span class="warning-icon">&#9888;</span>
+                            <span id="isolated-nodes-text">0 isolated nodes</span>
+                        </div>
                     </div>
                 </div>
             </aside>
@@ -250,6 +341,21 @@
                             <option value="604800">7 days</option>
                             <option value="2592000">30 days</option>
                         </select>
+                    </div>
+                </div>
+                <h3>Default Node Settings</h3>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="filter-default-height">Default Height (m)</label>
+                        <input type="number" id="filter-default-height" value="2" step="0.5" min="0">
+                    </div>
+                    <div class="form-group">
+                        <label for="filter-default-gain">Antenna Gain (dBi)</label>
+                        <input type="number" id="filter-default-gain" value="0" step="1">
+                    </div>
+                    <div class="form-group">
+                        <label for="filter-default-hoplimit">Hop Limit</label>
+                        <input type="number" id="filter-default-hoplimit" value="3" min="0" max="7">
                     </div>
                 </div>
                 <div class="form-group">
@@ -332,6 +438,52 @@
             </div>
         </div>
     </div>
+
+    <!-- Save Scenario Modal -->
+    <div id="save-modal" class="modal hidden">
+        <div class="modal-content">
+            <h2>Save Scenario</h2>
+            <div class="form-group">
+                <label for="scenario-name">Scenario Name</label>
+                <input type="text" id="scenario-name" placeholder="My Network Setup">
+            </div>
+            <div class="form-group">
+                <label for="scenario-description">Description (optional)</label>
+                <textarea id="scenario-description" rows="3" placeholder="Describe your network configuration..."></textarea>
+            </div>
+            <div class="modal-actions">
+                <button id="btn-save-cancel" class="btn btn-secondary">Cancel</button>
+                <button id="btn-save-confirm" class="btn btn-primary">Save &amp; Download</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Load Scenario Modal -->
+    <div id="load-modal" class="modal hidden">
+        <div class="modal-content">
+            <h2>Load Scenario</h2>
+            <div class="form-group">
+                <label for="scenario-file">Select Scenario File</label>
+                <input type="file" id="scenario-file" accept=".json,.scenario">
+            </div>
+            <div id="scenario-preview" class="scenario-preview hidden">
+                <h3>Scenario Preview</h3>
+                <div class="preview-info">
+                    <div><strong>Name:</strong> <span id="scenario-preview-name"></span></div>
+                    <div><strong>Nodes:</strong> <span id="scenario-preview-nodes"></span></div>
+                    <div><strong>Saved:</strong> <span id="scenario-preview-date"></span></div>
+                    <div><strong>Description:</strong> <span id="scenario-preview-desc"></span></div>
+                </div>
+            </div>
+            <div class="modal-actions">
+                <button id="btn-load-cancel" class="btn btn-secondary">Cancel</button>
+                <button id="btn-load-confirm" class="btn btn-primary" disabled>Load Scenario</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Hidden file input for loading scenarios -->
+    <input type="file" id="scenario-file-input" accept=".json,.scenario" style="display: none;">
 
     <script src="/static/js/app.js"></script>
 </body>

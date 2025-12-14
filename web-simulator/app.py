@@ -543,11 +543,219 @@ def get_simulation_status():
     })
 
 
+@app.route('/api/statistics')
+def get_statistics():
+    """Get network statistics dashboard data."""
+    nodes = list(simulator.nodes.values())
+    if not nodes:
+        return jsonify({
+            'totalNodes': 0,
+            'nodesByRole': {},
+            'networkConnectivity': 0,
+            'averageHops': 0,
+            'coverage': {'area': 0, 'radius': 0},
+            'links': {'total': 0, 'good': 0, 'medium': 0, 'poor': 0},
+            'isolatedNodes': [],
+            'networkDiameter': 0,
+            'averageSNR': 0
+        })
+
+    # Count nodes by role
+    nodes_by_role = {}
+    for node in nodes:
+        role = node.role
+        nodes_by_role[role] = nodes_by_role.get(role, 0) + 1
+
+    # Calculate all links and statistics
+    links = []
+    all_snrs = []
+    connectivity_matrix = {n.node_id: set() for n in nodes}
+
+    for i, n1 in enumerate(nodes):
+        for j, n2 in enumerate(nodes):
+            if i < j:
+                quality = simulator.calculate_link_quality(n1, n2)
+                if quality['canReceive']:
+                    links.append(quality)
+                    all_snrs.append(quality['snr'])
+                    connectivity_matrix[n1.node_id].add(n2.node_id)
+                    connectivity_matrix[n2.node_id].add(n1.node_id)
+
+    # Link quality distribution
+    good_links = sum(1 for l in links if l['signalQuality'] >= 70)
+    medium_links = sum(1 for l in links if 40 <= l['signalQuality'] < 70)
+    poor_links = sum(1 for l in links if l['signalQuality'] < 40)
+
+    # Find isolated nodes (no connections)
+    isolated_nodes = [
+        {'id': nid, 'name': simulator.nodes[nid].name or f'Node {nid}'}
+        for nid, connections in connectivity_matrix.items()
+        if len(connections) == 0
+    ]
+
+    # Calculate network connectivity (% of max possible connections)
+    max_connections = len(nodes) * (len(nodes) - 1) / 2 if len(nodes) > 1 else 1
+    connectivity = (len(links) / max_connections * 100) if max_connections > 0 else 0
+
+    # Calculate network diameter using BFS
+    def bfs_shortest_paths(start_id):
+        visited = {start_id: 0}
+        queue = [start_id]
+        while queue:
+            current = queue.pop(0)
+            for neighbor in connectivity_matrix[current]:
+                if neighbor not in visited:
+                    visited[neighbor] = visited[current] + 1
+                    queue.append(neighbor)
+        return visited
+
+    max_distance = 0
+    total_hops = 0
+    hop_count = 0
+    for node in nodes:
+        distances = bfs_shortest_paths(node.node_id)
+        if distances:
+            node_max = max(distances.values()) if distances.values() else 0
+            max_distance = max(max_distance, node_max)
+            for d in distances.values():
+                if d > 0:
+                    total_hops += d
+                    hop_count += 1
+
+    avg_hops = total_hops / hop_count if hop_count > 0 else 0
+
+    # Calculate coverage area (convex hull approximation using bounding box)
+    if nodes:
+        xs = [n.x for n in nodes]
+        ys = [n.y for n in nodes]
+        width = max(xs) - min(xs) if xs else 0
+        height = max(ys) - min(ys) if ys else 0
+        coverage_area = width * height / 1e6  # km²
+
+        # Average coverage radius per node
+        avg_coverage_radius = sum(simulator.calculate_coverage(n) for n in nodes) / len(nodes)
+    else:
+        coverage_area = 0
+        avg_coverage_radius = 0
+
+    return jsonify({
+        'totalNodes': len(nodes),
+        'nodesByRole': nodes_by_role,
+        'networkConnectivity': round(connectivity, 1),
+        'averageHops': round(avg_hops, 2),
+        'coverage': {
+            'area': round(coverage_area, 2),
+            'radius': round(avg_coverage_radius, 0)
+        },
+        'links': {
+            'total': len(links),
+            'good': good_links,
+            'medium': medium_links,
+            'poor': poor_links
+        },
+        'isolatedNodes': isolated_nodes,
+        'networkDiameter': max_distance,
+        'averageSNR': round(sum(all_snrs) / len(all_snrs), 1) if all_snrs else 0
+    })
+
+
 @app.route('/api/export/yaml')
 def export_yaml():
     """Export node configuration as YAML."""
     yaml_content = simulator.get_node_config_yaml()
     return yaml_content, 200, {'Content-Type': 'text/yaml'}
+
+
+@app.route('/api/scenario/save', methods=['POST'])
+def save_scenario():
+    """Save complete simulation scenario (nodes + settings + map position)."""
+    data = request.json or {}
+    scenario = {
+        'version': '1.0',
+        'savedAt': datetime.now().isoformat(),
+        'name': data.get('name', 'Untitled Scenario'),
+        'description': data.get('description', ''),
+        'config': {
+            'model': simulator.config.MODEL,
+            'xsize': simulator.config.XSIZE,
+            'ysize': simulator.config.YSIZE,
+            'hopLimit': simulator.config.hopLimit,
+            'modem': simulator.config.MODEM
+        },
+        'mapView': data.get('mapView', {}),
+        'nodes': [node.to_dict() for node in simulator.nodes.values()],
+        'channels': data.get('channels', [{'name': 'Default', 'psk': 'AQ==', 'index': 0}])
+    }
+    return jsonify(scenario)
+
+
+@app.route('/api/scenario/load', methods=['POST'])
+def load_scenario():
+    """Load a complete simulation scenario."""
+    try:
+        scenario = request.json
+        if not scenario:
+            return jsonify({'error': 'No scenario data provided'}), 400
+
+        # Validate version
+        version = scenario.get('version', '1.0')
+
+        # Load config
+        config_data = scenario.get('config', {})
+        if 'model' in config_data:
+            simulator.config.MODEL = int(config_data['model'])
+        if 'xsize' in config_data:
+            simulator.config.XSIZE = float(config_data['xsize'])
+        if 'ysize' in config_data:
+            simulator.config.YSIZE = float(config_data['ysize'])
+        if 'hopLimit' in config_data:
+            simulator.config.hopLimit = int(config_data['hopLimit'])
+        if 'modem' in config_data:
+            simulator.config.MODEM = int(config_data['modem'])
+
+        # Load nodes
+        simulator.clear_nodes()
+        nodes_data = scenario.get('nodes', [])
+        for node_data in nodes_data:
+            simulator.add_node(
+                x=float(node_data.get('x', 0)),
+                y=float(node_data.get('y', 0)),
+                z=float(node_data.get('z', 1.0)),
+                role=node_data.get('role', 'CLIENT'),
+                hop_limit=int(node_data.get('hopLimit', 3)),
+                antenna_gain=float(node_data.get('antennaGain', 0)),
+                name=node_data.get('name'),
+                source=node_data.get('source', 'manual'),
+                meshtastic_id=node_data.get('meshtasticId'),
+                short_name=node_data.get('shortName'),
+                long_name=node_data.get('longName'),
+                hw_model=node_data.get('hwModel'),
+                latitude=node_data.get('latitude'),
+                longitude=node_data.get('longitude')
+            )
+
+        # Return map view for frontend to restore
+        map_view = scenario.get('mapView', {})
+        channels = scenario.get('channels', [])
+
+        socketio.emit('scenario_loaded', {
+            'name': scenario.get('name', 'Untitled'),
+            'nodeCount': len(simulator.nodes),
+            'mapView': map_view,
+            'channels': channels
+        })
+
+        return jsonify({
+            'status': 'ok',
+            'name': scenario.get('name', 'Untitled'),
+            'nodeCount': len(simulator.nodes),
+            'mapView': map_view,
+            'channels': channels
+        })
+
+    except Exception as e:
+        logger.exception("Scenario load error")
+        return jsonify({'error': str(e)}), 400
 
 
 @app.route('/api/import/yaml', methods=['POST'])
@@ -656,6 +864,11 @@ def import_nodedb():
         last_heard_within = filters.get('lastHeardWithin', None)
         allowed_roles = filters.get('roles', None)
         clear_existing = filters.get('clearExisting', True)
+
+        # Default node settings (overridable via filters)
+        default_height = float(filters.get('defaultHeight', 2.0))  # Default 2m height
+        default_antenna_gain = float(filters.get('defaultAntennaGain', 0.0))  # 0 dBi default
+        default_hop_limit = int(filters.get('defaultHopLimit', 3))
 
         current_time = time.time()
 
@@ -766,13 +979,16 @@ def import_nodedb():
             }
             sim_role = role_map.get(node_data['role'], 'CLIENT')
 
+            # Use altitude from node if available, otherwise use default height
+            node_height = node_data['altitude'] if node_data['altitude'] and node_data['altitude'] > 0 else default_height
+
             simulator.add_node(
                 x=x,
                 y=y,
-                z=node_data['altitude'] or 1.0,
+                z=node_height,
                 role=sim_role,
-                hop_limit=3,  # Default, can be modified later
-                antenna_gain=0,
+                hop_limit=default_hop_limit,
+                antenna_gain=default_antenna_gain,
                 name=name,
                 source='imported',
                 meshtastic_id=node_data['meshtastic_id'],

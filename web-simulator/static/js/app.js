@@ -358,6 +358,43 @@ function initEventListeners() {
     document.getElementById('btn-clear-log').addEventListener('click', () => {
         document.getElementById('message-log').innerHTML = '';
     });
+
+    // Statistics refresh
+    document.getElementById('btn-refresh-stats').addEventListener('click', refreshStatistics);
+
+    // GPS coordinate toggle
+    document.getElementById('use-gps-coords').addEventListener('change', (e) => {
+        document.getElementById('coord-xy').classList.toggle('hidden', e.target.checked);
+        document.getElementById('coord-gps').classList.toggle('hidden', !e.target.checked);
+    });
+
+    // Channel configuration
+    document.getElementById('channel-psk-type').addEventListener('change', (e) => {
+        const customInput = document.getElementById('channel-psk-custom');
+        customInput.classList.toggle('hidden', e.target.value !== 'custom');
+        updateEncryptionStatus();
+    });
+    document.getElementById('channel-encryption-enabled').addEventListener('change', updateEncryptionStatus);
+
+    // Save/Load Scenario
+    document.getElementById('btn-save-scenario').addEventListener('click', () => {
+        document.getElementById('save-modal').classList.remove('hidden');
+    });
+    document.getElementById('btn-save-cancel').addEventListener('click', () => {
+        document.getElementById('save-modal').classList.add('hidden');
+    });
+    document.getElementById('btn-save-confirm').addEventListener('click', saveScenario);
+
+    document.getElementById('btn-load-scenario').addEventListener('click', () => {
+        document.getElementById('load-modal').classList.remove('hidden');
+    });
+    document.getElementById('btn-load-cancel').addEventListener('click', () => {
+        document.getElementById('load-modal').classList.add('hidden');
+        document.getElementById('scenario-preview').classList.add('hidden');
+        document.getElementById('scenario-file').value = '';
+    });
+    document.getElementById('scenario-file').addEventListener('change', previewScenarioFile);
+    document.getElementById('btn-load-confirm').addEventListener('click', loadScenario);
 }
 
 // ============== Geo Coordinate Conversions ==============
@@ -535,7 +572,11 @@ async function loadNodes() {
 
         updateNodeList();
         updateCommandSelects();
+        refreshStatistics();
         render();
+
+        // Preload tiles around current view
+        setTimeout(preloadTilesAroundView, 500);
     } catch (error) {
         log('Failed to load nodes', 'error');
     }
@@ -571,8 +612,27 @@ async function addNode(x, y) {
 }
 
 function addNodeFromForm() {
-    const x = parseFloat(document.getElementById('node-x').value) || 0;
-    const y = parseFloat(document.getElementById('node-y').value) || 0;
+    const useGPS = document.getElementById('use-gps-coords').checked;
+    let x, y;
+
+    if (useGPS) {
+        const lat = parseFloat(document.getElementById('node-lat').value);
+        const lon = parseFloat(document.getElementById('node-lon').value);
+
+        if (isNaN(lat) || isNaN(lon) || lat === 0 || lon === 0) {
+            log('Please enter valid GPS coordinates', 'error');
+            return;
+        }
+
+        // Convert to local meters relative to map center
+        const coords = latLonToMeters(lat, lon, state.mapCenter.lat, state.mapCenter.lon);
+        x = coords.x;
+        y = coords.y;
+    } else {
+        x = parseFloat(document.getElementById('node-x').value) || 0;
+        y = parseFloat(document.getElementById('node-y').value) || 0;
+    }
+
     addNode(x, y);
 }
 
@@ -2182,7 +2242,11 @@ function getNodeDBFilters() {
         maxHopsAway: document.getElementById('filter-max-hops').value || null,
         lastHeardWithin: document.getElementById('filter-last-heard').value || null,
         roles: roles.length > 0 ? roles : null,
-        clearExisting: document.getElementById('filter-clear-existing').checked
+        clearExisting: document.getElementById('filter-clear-existing').checked,
+        // Default node settings
+        defaultHeight: parseFloat(document.getElementById('filter-default-height').value) || 2.0,
+        defaultAntennaGain: parseFloat(document.getElementById('filter-default-gain').value) || 0,
+        defaultHopLimit: parseInt(document.getElementById('filter-default-hoplimit').value) || 3
     };
 }
 
@@ -2352,4 +2416,314 @@ function log(message, type = 'info') {
     }
 
     container.scrollTop = container.scrollHeight;
+}
+
+// ============== Network Statistics ==============
+
+function refreshStatistics() {
+    fetch('/api/statistics')
+        .then(res => res.json())
+        .then(data => {
+            document.getElementById('stat-total-nodes').textContent = data.totalNodes;
+            document.getElementById('stat-connectivity').textContent = data.networkConnectivity + '%';
+            document.getElementById('stat-avg-hops').textContent = data.averageHops;
+            document.getElementById('stat-diameter').textContent = data.networkDiameter;
+            document.getElementById('stat-avg-snr').textContent = data.averageSNR + ' dB';
+            document.getElementById('stat-coverage').textContent = data.coverage.area + ' km²';
+            document.getElementById('stat-links-total').textContent = data.links.total;
+
+            // Update link quality bars
+            const total = data.links.total || 1;
+            document.getElementById('stat-links-good').style.width = (data.links.good / total * 100) + '%';
+            document.getElementById('stat-links-medium').style.width = (data.links.medium / total * 100) + '%';
+            document.getElementById('stat-links-poor').style.width = (data.links.poor / total * 100) + '%';
+
+            // Show isolated nodes warning if any
+            const isolatedWarning = document.getElementById('isolated-nodes-warning');
+            if (data.isolatedNodes && data.isolatedNodes.length > 0) {
+                isolatedWarning.classList.remove('hidden');
+                document.getElementById('isolated-nodes-text').textContent =
+                    `${data.isolatedNodes.length} isolated node(s): ${data.isolatedNodes.map(n => n.name).join(', ')}`;
+            } else {
+                isolatedWarning.classList.add('hidden');
+            }
+        })
+        .catch(err => {
+            debugLog('Failed to load statistics:', err);
+        });
+}
+
+// ============== Save/Load Scenarios ==============
+
+let pendingScenario = null;
+
+function saveScenario() {
+    const name = document.getElementById('scenario-name').value || 'Untitled Scenario';
+    const description = document.getElementById('scenario-description').value || '';
+
+    // Collect current map view state
+    const mapView = {
+        centerLat: state.mapCenter.lat,
+        centerLon: state.mapCenter.lon,
+        zoomLevel: state.zoomLevel,
+        viewOffsetX: state.viewOffset.x,
+        viewOffsetY: state.viewOffset.y
+    };
+
+    // Collect channel configuration
+    const channels = [{
+        name: document.getElementById('channel-name').value || 'Default',
+        pskType: document.getElementById('channel-psk-type').value,
+        psk: document.getElementById('channel-psk-custom').value || '',
+        encryptionEnabled: document.getElementById('channel-encryption-enabled').checked,
+        index: 0
+    }];
+
+    fetch('/api/scenario/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, description, mapView, channels })
+    })
+    .then(res => res.json())
+    .then(scenario => {
+        // Create downloadable file
+        const blob = new Blob([JSON.stringify(scenario, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${name.replace(/[^a-z0-9]/gi, '_')}.scenario.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+
+        document.getElementById('save-modal').classList.add('hidden');
+        log(`Scenario "${name}" saved`, 'success');
+    })
+    .catch(err => {
+        log('Failed to save scenario: ' + err.message, 'error');
+    });
+}
+
+function previewScenarioFile(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+        try {
+            const scenario = JSON.parse(event.target.result);
+            pendingScenario = scenario;
+
+            // Show preview
+            document.getElementById('scenario-preview-name').textContent = scenario.name || 'Untitled';
+            document.getElementById('scenario-preview-nodes').textContent = (scenario.nodes || []).length;
+            document.getElementById('scenario-preview-date').textContent = scenario.savedAt ?
+                new Date(scenario.savedAt).toLocaleString() : 'Unknown';
+            document.getElementById('scenario-preview-desc').textContent = scenario.description || 'No description';
+
+            document.getElementById('scenario-preview').classList.remove('hidden');
+            document.getElementById('btn-load-confirm').disabled = false;
+        } catch (err) {
+            log('Invalid scenario file: ' + err.message, 'error');
+            pendingScenario = null;
+            document.getElementById('btn-load-confirm').disabled = true;
+        }
+    };
+    reader.readAsText(file);
+}
+
+function loadScenario() {
+    if (!pendingScenario) return;
+
+    fetch('/api/scenario/load', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(pendingScenario)
+    })
+    .then(res => res.json())
+    .then(data => {
+        if (data.error) {
+            log('Load error: ' + data.error, 'error');
+            return;
+        }
+
+        // Restore map view
+        if (data.mapView) {
+            if (data.mapView.centerLat && data.mapView.centerLon) {
+                state.mapCenter = { lat: data.mapView.centerLat, lon: data.mapView.centerLon };
+            }
+            if (data.mapView.zoomLevel) {
+                state.zoomLevel = data.mapView.zoomLevel;
+            }
+            if (data.mapView.viewOffsetX !== undefined) {
+                state.viewOffset.x = data.mapView.viewOffsetX;
+                state.viewOffset.y = data.mapView.viewOffsetY;
+            }
+            updateZoomDisplay();
+        }
+
+        // Restore channel config
+        if (data.channels && data.channels.length > 0) {
+            const ch = data.channels[0];
+            document.getElementById('channel-name').value = ch.name || 'Default';
+            document.getElementById('channel-psk-type').value = ch.pskType || 'default';
+            document.getElementById('channel-psk-custom').value = ch.psk || '';
+            document.getElementById('channel-encryption-enabled').checked = ch.encryptionEnabled !== false;
+            updateEncryptionStatus();
+        }
+
+        // Close modal and reload
+        document.getElementById('load-modal').classList.add('hidden');
+        document.getElementById('scenario-file').value = '';
+        pendingScenario = null;
+
+        loadNodes();
+        log(`Loaded scenario "${data.name}" with ${data.nodeCount} nodes`, 'success');
+    })
+    .catch(err => {
+        log('Failed to load scenario: ' + err.message, 'error');
+    });
+}
+
+// ============== Channel & Encryption ==============
+
+function updateEncryptionStatus() {
+    const enabled = document.getElementById('channel-encryption-enabled').checked;
+    const pskType = document.getElementById('channel-psk-type').value;
+    const statusEl = document.getElementById('encryption-status');
+    const iconEl = statusEl.querySelector('.status-icon');
+    const textEl = statusEl.querySelector('.status-text');
+
+    if (!enabled || pskType === 'none') {
+        iconEl.textContent = '\u{1F513}'; // Unlocked
+        iconEl.className = 'status-icon unencrypted';
+        textEl.textContent = 'Messages are NOT encrypted';
+    } else {
+        iconEl.textContent = '\u{1F512}'; // Locked
+        iconEl.className = 'status-icon encrypted';
+        const keyType = pskType === 'default' ? 'default key' :
+                       pskType === 'random' ? 'random key' : 'custom key';
+        textEl.textContent = `Messages encrypted with ${keyType}`;
+    }
+}
+
+// ============== GPS Coordinate Support ==============
+
+function addNodeWithGPS() {
+    const useGPS = document.getElementById('use-gps-coords').checked;
+    let x, y;
+
+    if (useGPS) {
+        const lat = parseFloat(document.getElementById('node-lat').value);
+        const lon = parseFloat(document.getElementById('node-lon').value);
+
+        if (isNaN(lat) || isNaN(lon)) {
+            log('Invalid GPS coordinates', 'error');
+            return null;
+        }
+
+        // Convert to local meters relative to map center
+        const coords = latLonToMeters(lat, lon, state.mapCenter.lat, state.mapCenter.lon);
+        x = coords.x;
+        y = coords.y;
+    } else {
+        x = parseFloat(document.getElementById('node-x').value) || 0;
+        y = parseFloat(document.getElementById('node-y').value) || 0;
+    }
+
+    return { x, y, useGPS };
+}
+
+// ============== Performance Optimization ==============
+
+// Tile preloading for smoother map experience
+const tilePreloadQueue = [];
+let preloadingActive = false;
+
+function preloadTilesAroundView() {
+    if (preloadingActive) return;
+
+    const margin = 2; // Preload 2 tiles beyond visible area
+    const zoom = state.zoomLevel;
+    const mpp = metersPerPixel(state.mapCenter.lat, zoom);
+
+    const centerPixel = latLonToPixel(state.mapCenter.lat, state.mapCenter.lon, zoom);
+    const offsetPixels = {
+        x: state.viewOffset.x,
+        y: state.viewOffset.y
+    };
+
+    const topLeftTileX = Math.floor((centerPixel.x + offsetPixels.x - state.canvas.width / 2 - margin * state.tileSize) / state.tileSize);
+    const topLeftTileY = Math.floor((centerPixel.y + offsetPixels.y - state.canvas.height / 2 - margin * state.tileSize) / state.tileSize);
+    const bottomRightTileX = Math.ceil((centerPixel.x + offsetPixels.x + state.canvas.width / 2 + margin * state.tileSize) / state.tileSize);
+    const bottomRightTileY = Math.ceil((centerPixel.y + offsetPixels.y + state.canvas.height / 2 + margin * state.tileSize) / state.tileSize);
+
+    for (let tx = topLeftTileX; tx <= bottomRightTileX; tx++) {
+        for (let ty = topLeftTileY; ty <= bottomRightTileY; ty++) {
+            const key = `${zoom}/${tx}/${ty}`;
+            if (!state.tileCache.has(key) && !state.loadingTiles.has(key)) {
+                tilePreloadQueue.push({ zoom, x: tx, y: ty });
+            }
+        }
+    }
+
+    if (tilePreloadQueue.length > 0) {
+        preloadingActive = true;
+        preloadNextTile();
+    }
+}
+
+function preloadNextTile() {
+    if (tilePreloadQueue.length === 0) {
+        preloadingActive = false;
+        return;
+    }
+
+    const tile = tilePreloadQueue.shift();
+    const key = `${tile.zoom}/${tile.x}/${tile.y}`;
+
+    if (state.tileCache.has(key) || state.loadingTiles.has(key)) {
+        preloadNextTile();
+        return;
+    }
+
+    state.loadingTiles.add(key);
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+        state.tileCache.set(key, img);
+        state.loadingTiles.delete(key);
+        setTimeout(preloadNextTile, 50); // Small delay to not overwhelm
+    };
+    img.onerror = () => {
+        state.loadingTiles.delete(key);
+        setTimeout(preloadNextTile, 100);
+    };
+    img.src = `${TILE_SERVER}/${tile.zoom}/${tile.x}/${tile.y}.png`;
+}
+
+// Animation frame throttling for large networks
+const ANIMATION_THROTTLE_THRESHOLD = 20; // nodes
+let lastAnimationFrame = 0;
+const MIN_FRAME_INTERVAL = 1000 / 30; // 30 FPS max for large networks
+
+function shouldThrottleAnimation() {
+    return state.nodes.size > ANIMATION_THROTTLE_THRESHOLD;
+}
+
+function throttledRequestAnimationFrame(callback) {
+    if (shouldThrottleAnimation()) {
+        const now = performance.now();
+        const elapsed = now - lastAnimationFrame;
+        if (elapsed < MIN_FRAME_INTERVAL) {
+            setTimeout(() => {
+                lastAnimationFrame = performance.now();
+                requestAnimationFrame(callback);
+            }, MIN_FRAME_INTERVAL - elapsed);
+            return;
+        }
+        lastAnimationFrame = now;
+    }
+    requestAnimationFrame(callback);
 }
