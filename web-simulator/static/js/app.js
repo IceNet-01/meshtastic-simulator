@@ -143,6 +143,12 @@ document.addEventListener('DOMContentLoaded', () => {
         console.error('Event listeners init failed:', e);
     }
 
+    try {
+        initNodeDBFileSelector();
+    } catch (e) {
+        console.error('NodeDB file selector init failed:', e);
+    }
+
     loadConfig();
     loadNodes();
 
@@ -2276,6 +2282,64 @@ function escapeHtml(text) {
 
 // ============== NodeDB Import Functions ==============
 
+/**
+ * Parse NodeDB JSON text, handling various formats including "Nodes in mesh:" prefix
+ */
+function parseNodeDBText(text) {
+    let jsonText = text.trim();
+
+    // Handle "Nodes in mesh:" prefix (from Meshtastic CLI output)
+    if (jsonText.startsWith('Nodes in mesh:')) {
+        jsonText = jsonText.substring('Nodes in mesh:'.length).trim();
+    }
+
+    // Try to parse the JSON
+    const parsed = JSON.parse(jsonText);
+
+    // If it's a direct node dictionary (not wrapped in nodedb structure),
+    // wrap it appropriately
+    if (parsed && typeof parsed === 'object') {
+        // Check if it looks like a raw nodes dictionary (keys start with '!')
+        const keys = Object.keys(parsed);
+        if (keys.length > 0 && keys[0].startsWith('!')) {
+            // It's a raw nodes dictionary, wrap it
+            return { nodes: parsed };
+        }
+        // Check if it's already in the nodedb format
+        if (parsed.nodedb && parsed.nodedb.nodes) {
+            return parsed.nodedb;
+        }
+        if (parsed.nodes) {
+            return parsed;
+        }
+    }
+
+    return parsed;
+}
+
+/**
+ * Handle file selection for NodeDB import
+ */
+function initNodeDBFileSelector() {
+    const fileInput = document.getElementById('nodedb-file');
+    if (fileInput) {
+        fileInput.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = (event) => {
+                document.getElementById('nodedb-json').value = event.target.result;
+                log(`Loaded ${file.name}`, 'success');
+            };
+            reader.onerror = () => {
+                log('Failed to read file', 'error');
+            };
+            reader.readAsText(file);
+        });
+    }
+}
+
 function getNodeDBFilters() {
     const roles = [];
     document.querySelectorAll('.filter-role:checked').forEach(cb => {
@@ -2298,13 +2362,13 @@ function getNodeDBFilters() {
 function previewNodeDB() {
     const jsonText = document.getElementById('nodedb-json').value.trim();
     if (!jsonText) {
-        log('Please paste NodeDB JSON data', 'error');
+        log('Please paste NodeDB JSON data or load from file', 'error');
         return;
     }
 
     let nodedb;
     try {
-        nodedb = JSON.parse(jsonText);
+        nodedb = parseNodeDBText(jsonText);
     } catch (e) {
         log('Invalid JSON format: ' + e.message, 'error');
         return;
@@ -2384,13 +2448,13 @@ function previewNodeDB() {
 function importNodeDB() {
     const jsonText = document.getElementById('nodedb-json').value.trim();
     if (!jsonText) {
-        log('Please paste NodeDB JSON data', 'error');
+        log('Please paste NodeDB JSON data or load from file', 'error');
         return;
     }
 
     let nodedb;
     try {
-        nodedb = JSON.parse(jsonText);
+        nodedb = parseNodeDBText(jsonText);
     } catch (e) {
         log('Invalid JSON format: ' + e.message, 'error');
         return;

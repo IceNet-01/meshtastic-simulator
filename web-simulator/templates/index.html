@@ -314,11 +314,16 @@
     <div id="nodedb-modal" class="modal hidden">
         <div class="modal-content modal-large">
             <h2>Import from Meshtastic NodeDB</h2>
-            <p class="hint">Paste NodeDB JSON export from Meshtastic Python CLI or app</p>
+            <p class="hint">Paste NodeDB JSON export from Meshtastic Python CLI or app, or load from file</p>
+
+            <div class="form-group">
+                <label for="nodedb-file">Load from File</label>
+                <input type="file" id="nodedb-file" accept=".json,.txt" style="margin-bottom: 8px;">
+            </div>
 
             <div class="form-group">
                 <label for="nodedb-json">NodeDB JSON</label>
-                <textarea id="nodedb-json" placeholder='{"nodes": {...}}' rows="6"></textarea>
+                <textarea id="nodedb-json" placeholder='{"nodes": {...}} or "Nodes in mesh: {...}"' rows="6"></textarea>
             </div>
 
             <div class="nodedb-filters">
@@ -378,8 +383,11 @@
                     <label>Node Roles</label>
                     <div class="checkbox-group">
                         <label><input type="checkbox" class="filter-role" value="CLIENT" checked> Client</label>
+                        <label><input type="checkbox" class="filter-role" value="CLIENT_MUTE" checked> Client Mute</label>
+                        <label><input type="checkbox" class="filter-role" value="CLIENT_BASE" checked> Client Base</label>
                         <label><input type="checkbox" class="filter-role" value="ROUTER" checked> Router</label>
                         <label><input type="checkbox" class="filter-role" value="ROUTER_CLIENT" checked> Router Client</label>
+                        <label><input type="checkbox" class="filter-role" value="ROUTER_LATE" checked> Router Late</label>
                         <label><input type="checkbox" class="filter-role" value="REPEATER" checked> Repeater</label>
                         <label><input type="checkbox" class="filter-role" value="TRACKER" checked> Tracker</label>
                     </div>
