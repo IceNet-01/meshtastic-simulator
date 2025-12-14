@@ -6,6 +6,7 @@
 // ============== State Management ==============
 const state = {
     nodes: new Map(),
+    links: [],  // RF-calculated links from server
     selectedNodes: new Set(),
     config: null,
     socket: null,
@@ -499,18 +500,24 @@ function drawMapTiles() {
     const canvas = state.canvas;
     const zoom = Math.floor(state.zoomLevel);
 
-    // Calculate center tile
+    // Calculate scale factor for fractional zoom
+    // When zoomLevel=13.5, tiles from zoom 13 should be drawn 1.41x larger (2^0.5)
+    const zoomFraction = state.zoomLevel - zoom;
+    const scaleFactor = Math.pow(2, zoomFraction);
+    const scaledTileSize = state.tileSize * scaleFactor;
+
+    // Calculate center tile using the integer zoom level
     const centerPixel = latLonToPixel(state.mapCenter.lat, state.mapCenter.lon, zoom);
     const centerTileX = Math.floor(centerPixel.x / state.tileSize);
     const centerTileY = Math.floor(centerPixel.y / state.tileSize);
 
-    // Calculate offset within center tile
-    const offsetX = centerPixel.x % state.tileSize;
-    const offsetY = centerPixel.y % state.tileSize;
+    // Calculate offset within center tile, scaled for fractional zoom
+    const offsetX = (centerPixel.x % state.tileSize) * scaleFactor;
+    const offsetY = (centerPixel.y % state.tileSize) * scaleFactor;
 
-    // Calculate how many tiles we need
-    const tilesX = Math.ceil(canvas.width / state.tileSize) + 2;
-    const tilesY = Math.ceil(canvas.height / state.tileSize) + 2;
+    // Calculate how many tiles we need (account for larger scaled tiles)
+    const tilesX = Math.ceil(canvas.width / scaledTileSize) + 2;
+    const tilesY = Math.ceil(canvas.height / scaledTileSize) + 2;
 
     // Draw tiles
     for (let dx = -Math.floor(tilesX / 2); dx <= Math.ceil(tilesX / 2); dx++) {
@@ -524,19 +531,19 @@ function drawMapTiles() {
                 continue;
             }
 
-            const screenX = canvas.width / 2 - offsetX + dx * state.tileSize + state.viewOffset.x;
-            const screenY = canvas.height / 2 - offsetY + dy * state.tileSize + state.viewOffset.y;
+            const screenX = canvas.width / 2 - offsetX + dx * scaledTileSize + state.viewOffset.x;
+            const screenY = canvas.height / 2 - offsetY + dy * scaledTileSize + state.viewOffset.y;
 
             const tile = loadTile(tileX, tileY, zoom);
 
             if (tile) {
-                ctx.drawImage(tile, screenX, screenY, state.tileSize, state.tileSize);
+                ctx.drawImage(tile, screenX, screenY, scaledTileSize, scaledTileSize);
             } else {
                 // Draw placeholder
                 ctx.fillStyle = '#2a3a4a';
-                ctx.fillRect(screenX, screenY, state.tileSize, state.tileSize);
+                ctx.fillRect(screenX, screenY, scaledTileSize, scaledTileSize);
                 ctx.strokeStyle = '#3a4a5a';
-                ctx.strokeRect(screenX, screenY, state.tileSize, state.tileSize);
+                ctx.strokeRect(screenX, screenY, scaledTileSize, scaledTileSize);
             }
         }
     }
@@ -570,6 +577,9 @@ async function loadNodes() {
             state.nodes.set(node.id, node);
         });
 
+        // Fetch topology to get RF-calculated links
+        await refreshTopology();
+
         updateNodeList();
         updateCommandSelects();
         refreshStatistics();
@@ -579,6 +589,17 @@ async function loadNodes() {
         setTimeout(preloadTilesAroundView, 500);
     } catch (error) {
         log('Failed to load nodes', 'error');
+    }
+}
+
+async function refreshTopology() {
+    try {
+        const topology = await getTopology();
+        state.links = topology.links || [];
+        debugLog(`Loaded ${state.links.length} RF links`);
+    } catch (error) {
+        console.error('Failed to refresh topology:', error);
+        state.links = [];
     }
 }
 
@@ -600,6 +621,10 @@ async function addNode(x, y) {
 
         const node = await response.json();
         state.nodes.set(node.id, node);
+
+        // Refresh RF links since topology changed
+        await refreshTopology();
+
         updateNodeList();
         updateCommandSelects();
         render();
@@ -648,6 +673,10 @@ async function updateNode(nodeId, updates) {
 
         const node = await response.json();
         state.nodes.set(node.id, node);
+
+        // Refresh RF links since topology may have changed (position, height, gain)
+        await refreshTopology();
+
         updateNodeList();
         render();
         return node;
@@ -660,6 +689,13 @@ async function updateNode(nodeId, updates) {
 async function deleteNode(nodeId) {
     try {
         await fetch(`/api/nodes/${nodeId}`, { method: 'DELETE' });
+        state.nodes.delete(nodeId);
+
+        // Refresh RF links since topology changed
+        await refreshTopology();
+
+        updateNodeList();
+        render();
     } catch (error) {
         log('Failed to delete node: ' + error.message, 'error');
     }
@@ -821,42 +857,39 @@ function drawScaleBar() {
 
 function drawLinks() {
     const ctx = state.ctx;
-    const nodesArray = Array.from(state.nodes.values());
 
-    // Draw all possible links
-    for (let i = 0; i < nodesArray.length; i++) {
-        for (let j = i + 1; j < nodesArray.length; j++) {
-            const n1 = nodesArray[i];
-            const n2 = nodesArray[j];
+    // Draw links from server-calculated RF propagation data
+    state.links.forEach(link => {
+        const n1 = state.nodes.get(link.source);
+        const n2 = state.nodes.get(link.target);
 
-            // Simple distance-based check for visibility
-            const dist = Math.sqrt(Math.pow(n1.x - n2.x, 2) + Math.pow(n1.y - n2.y, 2));
-            const maxRange = Math.max(n1.coverageRadius || 5000, n2.coverageRadius || 5000);
+        if (!n1 || !n2) return;
 
-            if (dist < maxRange) {
-                const p1 = worldToScreen(n1.x, n1.y);
-                const p2 = worldToScreen(n2.x, n2.y);
+        const p1 = worldToScreen(n1.x, n1.y);
+        const p2 = worldToScreen(n2.x, n2.y);
 
-                // Calculate signal quality for color
-                const quality = 1 - (dist / maxRange);
+        // Use signal quality from server (0-100)
+        const quality = link.signalQuality / 100;
 
-                ctx.beginPath();
-                ctx.moveTo(p1.x, p1.y);
-                ctx.lineTo(p2.x, p2.y);
+        ctx.beginPath();
+        ctx.moveTo(p1.x, p1.y);
+        ctx.lineTo(p2.x, p2.y);
 
-                if (quality > 0.5) {
-                    ctx.strokeStyle = `rgba(15, 155, 15, ${0.3 + quality * 0.4})`;
-                } else if (quality > 0.25) {
-                    ctx.strokeStyle = `rgba(243, 156, 18, ${0.3 + quality * 0.4})`;
-                } else {
-                    ctx.strokeStyle = `rgba(233, 69, 96, ${0.3 + quality * 0.4})`;
-                }
-
-                ctx.lineWidth = 2;
-                ctx.stroke();
-            }
+        // Color based on signal quality
+        if (quality > 0.5) {
+            // Good signal (green)
+            ctx.strokeStyle = `rgba(15, 155, 15, ${0.4 + quality * 0.4})`;
+        } else if (quality > 0.2) {
+            // Medium signal (yellow/orange)
+            ctx.strokeStyle = `rgba(243, 156, 18, ${0.4 + quality * 0.4})`;
+        } else {
+            // Weak signal (red) - but still receivable
+            ctx.strokeStyle = `rgba(233, 69, 96, ${0.3 + quality * 0.3})`;
         }
-    }
+
+        ctx.lineWidth = 2;
+        ctx.stroke();
+    });
 }
 
 function drawRoute(route) {
