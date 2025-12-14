@@ -11,7 +11,7 @@ Built as a wrapper around [Meshtasticator](https://github.com/meshtastic/Meshtas
 
 ## Demo
 
-https://github.com/IceNet-01/meshtastic-simulator/raw/main/Recording%202025-12-14%20142541.mp4
+<video src="https://github.com/IceNet-01/meshtastic-simulator/raw/main/Recording%202025-12-14%20142541.mp4" controls width="100%"></video>
 
 ## Features
 
