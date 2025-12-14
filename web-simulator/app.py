@@ -979,8 +979,10 @@ def import_nodedb():
             }
             sim_role = role_map.get(node_data['role'], 'CLIENT')
 
-            # Use altitude from node if available, otherwise use default height
-            node_height = node_data['altitude'] if node_data['altitude'] and node_data['altitude'] > 0 else default_height
+            # Always use default height for imported nodes
+            # NodeDB altitude is MSL (meters above sea level), not AGL (above ground level)
+            # For radio propagation, we need AGL which is typically 1-10m for portable devices
+            node_height = default_height
 
             simulator.add_node(
                 x=x,
