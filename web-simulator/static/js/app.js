@@ -114,27 +114,30 @@ function startRenderLoop() {
     }
 }
 
+// Debug mode - set to true to enable console logging
+const DEBUG = false;
+function debugLog(...args) {
+    if (DEBUG) console.log(...args);
+}
+
 // ============== Initialization ==============
 document.addEventListener('DOMContentLoaded', () => {
-    console.log('Meshtastic Web Simulator initializing...');
+    debugLog('Meshtastic Web Simulator initializing...');
 
     try {
         initCanvas();
-        console.log('Canvas initialized');
     } catch (e) {
         console.error('Canvas init failed:', e);
     }
 
     try {
         initSocket();
-        console.log('Socket initialized');
     } catch (e) {
         console.error('Socket init failed:', e);
     }
 
     try {
         initEventListeners();
-        console.log('Event listeners initialized');
     } catch (e) {
         console.error('Event listeners init failed:', e);
     }
@@ -164,7 +167,6 @@ document.addEventListener('DOMContentLoaded', () => {
     // Handle visibility changes - restart render loop when tab becomes visible
     document.addEventListener('visibilitychange', () => {
         if (!document.hidden && state.animation.active) {
-            console.log('Tab visible, restarting render loop');
             startRenderLoop();
         }
     });
@@ -176,7 +178,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    console.log('Initialization complete');
+    debugLog('Initialization complete');
 });
 
 function initCanvas() {
@@ -621,7 +623,7 @@ function render() {
     const canvas = state.canvas;
 
     if (renderCount < 3) {
-        console.log(`Render #${renderCount + 1}: canvas=${canvas.width}x${canvas.height}, nodes=${state.nodes.size}`);
+        debugLog(`Render #${renderCount + 1}: canvas=${canvas.width}x${canvas.height}, nodes=${state.nodes.size}`);
         renderCount++;
     }
 
@@ -1069,8 +1071,10 @@ function handleMouseUp(e) {
 function handleMouseLeave() {
     if (state.isDragging && state.dragMode === 'node' && state.draggedNode) {
         // Cancel node drag on leave
+        const nodeName = state.draggedNode.name || 'Node ' + state.draggedNode.id;
         loadNodes(); // Reload to reset position
         state.draggedNode = null;
+        log(`Move cancelled for ${nodeName} (dragged outside canvas)`, 'warning');
     }
     state.isDragging = false;
     state.dragMode = 'pan';
@@ -1147,13 +1151,28 @@ function updateNodeList() {
     state.nodes.forEach(node => {
         const item = document.createElement('div');
         item.className = 'node-item' + (state.selectedNodes.has(node.id) ? ' selected' : '');
-        item.innerHTML = `
-            <div class="node-info">
-                <span class="node-name">${node.name || 'Node ' + node.id}</span>
-                <span class="node-details">X: ${Math.round(node.x)}, Y: ${Math.round(node.y)}, H: ${node.z}m</span>
-            </div>
-            <span class="node-role ${node.role.toLowerCase()}">${node.role}</span>
-        `;
+
+        // Build DOM safely to prevent XSS
+        const nodeInfo = document.createElement('div');
+        nodeInfo.className = 'node-info';
+
+        const nodeName = document.createElement('span');
+        nodeName.className = 'node-name';
+        nodeName.textContent = node.name || 'Node ' + node.id;
+
+        const nodeDetails = document.createElement('span');
+        nodeDetails.className = 'node-details';
+        nodeDetails.textContent = `X: ${Math.round(node.x)}, Y: ${Math.round(node.y)}, H: ${node.z}m`;
+
+        nodeInfo.appendChild(nodeName);
+        nodeInfo.appendChild(nodeDetails);
+
+        const nodeRole = document.createElement('span');
+        nodeRole.className = 'node-role ' + (node.role || 'CLIENT').toLowerCase();
+        nodeRole.textContent = node.role || 'CLIENT';
+
+        item.appendChild(nodeInfo);
+        item.appendChild(nodeRole);
 
         item.addEventListener('click', () => {
             state.selectedNodes.clear();
@@ -1312,7 +1331,7 @@ function sendBroadcast() {
     const sourceNode = getNodeById(fromNodeId);
     const hopLimit = sourceNode ? (sourceNode.hopLimit || 3) : 3;
 
-    console.log('Sending broadcast:', { from: fromNodeId, text, hopLimit });
+    debugLog('Sending broadcast:', { from: fromNodeId, text, hopLimit });
     log(`Sending broadcast from Node ${fromNodeId} (hop limit: ${hopLimit})...`, 'info');
 
     state.socket.emit('send_command', {
@@ -1331,7 +1350,7 @@ function sendDM() {
         return;
     }
 
-    console.log('Sending DM:', { from: fromNode, to: toNode, text });
+    debugLog('Sending DM:', { from: fromNode, to: toNode, text });
     log(`Sending DM from Node ${fromNode} to Node ${toNode}...`, 'info');
 
     state.socket.emit('send_command', {
@@ -1349,7 +1368,7 @@ function sendTraceroute() {
         return;
     }
 
-    console.log('Running traceroute:', { from: fromNode, to: toNode });
+    debugLog('Running traceroute:', { from: fromNode, to: toNode });
     log(`Running traceroute from Node ${fromNode} to Node ${toNode}...`, 'info');
 
     state.socket.emit('send_command', {
@@ -1385,7 +1404,7 @@ function getNodeById(id) {
 }
 
 function startBroadcastAnimation(simulation) {
-    console.log('Starting broadcast animation:', simulation);
+    debugLog('Starting broadcast animation:', simulation);
 
     // Reset animation state
     state.animation = {
@@ -1486,7 +1505,7 @@ function animateBroadcast(timestamp) {
 }
 
 function startDMAnimation(simulation) {
-    console.log('Starting DM animation:', simulation);
+    debugLog('Starting DM animation:', simulation);
 
     // DM now uses flood propagation like broadcast
     // Show the flood, then highlight the path to destination (if reached)
@@ -1675,7 +1694,7 @@ function animateDM(timestamp) {
 }
 
 function startTracerouteAnimation(simulation) {
-    console.log('Starting traceroute animation:', simulation);
+    debugLog('Starting traceroute animation:', simulation);
 
     // Get target node from destination field (works even when path is empty)
     const targetNode = simulation.destination !== undefined ? simulation.destination :
@@ -1895,10 +1914,18 @@ function drawAnimations() {
         // Draw packet as glowing circle
         const packetColor = packet.isDM ? '#00ff00' : packet.isTraceroute ? '#ffff00' : '#00ffff';
 
+        // Convert hex color to rgba with alpha
+        function hexToRgba(hex, alpha) {
+            const r = parseInt(hex.slice(1, 3), 16);
+            const g = parseInt(hex.slice(3, 5), 16);
+            const b = parseInt(hex.slice(5, 7), 16);
+            return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+        }
+
         // Outer glow
         ctx.beginPath();
         ctx.arc(x, y, 12, 0, Math.PI * 2);
-        ctx.fillStyle = packetColor.replace(')', ', 0.3)').replace('rgb', 'rgba').replace('#', 'rgba(');
+        ctx.fillStyle = hexToRgba(packetColor, 0.3);
         ctx.shadowColor = packetColor;
         ctx.shadowBlur = 15;
         ctx.fill();
@@ -2113,14 +2140,35 @@ function applySettings() {
     });
 }
 
+// HTML escape function to prevent XSS
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+const MAX_LOG_ENTRIES = 500;
+
 function log(message, type = 'info') {
     const container = document.getElementById('message-log');
     const timestamp = new Date().toLocaleTimeString();
 
     const entry = document.createElement('div');
     entry.className = `log-entry ${type}`;
-    entry.innerHTML = `<span class="timestamp">[${timestamp}]</span>${message}`;
+
+    const timestampSpan = document.createElement('span');
+    timestampSpan.className = 'timestamp';
+    timestampSpan.textContent = `[${timestamp}]`;
+
+    entry.appendChild(timestampSpan);
+    entry.appendChild(document.createTextNode(message));
 
     container.appendChild(entry);
+
+    // Prune old entries to prevent memory bloat
+    while (container.children.length > MAX_LOG_ENTRIES) {
+        container.removeChild(container.firstChild);
+    }
+
     container.scrollTop = container.scrollHeight;
 }

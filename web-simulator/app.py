@@ -9,6 +9,7 @@ import os
 import sys
 import json
 import time
+import logging
 import threading
 import queue
 from datetime import datetime
@@ -17,6 +18,13 @@ from typing import Dict, List, Optional, Any
 import yaml
 from flask import Flask, render_template, request, jsonify, send_from_directory
 from flask_socketio import SocketIO, emit
+
+# Configure logging - set to WARNING by default, DEBUG for verbose output
+logging.basicConfig(
+    level=os.environ.get('LOG_LEVEL', 'WARNING').upper(),
+    format='%(asctime)s [%(levelname)s] %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # Add the upstream meshtasticator to the path
 UPSTREAM_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'upstream-meshtasticator')
@@ -330,20 +338,55 @@ def get_config():
 
 @app.route('/api/config', methods=['POST'])
 def update_config():
-    """Update simulator configuration."""
+    """Update simulator configuration with validation."""
     data = request.json
+    errors = []
+
     if 'model' in data:
-        simulator.config.MODEL = int(data['model'])
+        model = int(data['model'])
+        if 0 <= model <= 6:
+            simulator.config.MODEL = model
+        else:
+            errors.append('model must be between 0 and 6')
+
     if 'xsize' in data:
-        simulator.config.XSIZE = float(data['xsize'])
+        xsize = float(data['xsize'])
+        if 100 <= xsize <= 1000000:
+            simulator.config.XSIZE = xsize
+        else:
+            errors.append('xsize must be between 100 and 1000000 meters')
+
     if 'ysize' in data:
-        simulator.config.YSIZE = float(data['ysize'])
+        ysize = float(data['ysize'])
+        if 100 <= ysize <= 1000000:
+            simulator.config.YSIZE = ysize
+        else:
+            errors.append('ysize must be between 100 and 1000000 meters')
+
     if 'hopLimit' in data:
-        simulator.config.hopLimit = int(data['hopLimit'])
+        hop_limit = int(data['hopLimit'])
+        if 1 <= hop_limit <= 7:
+            simulator.config.hopLimit = hop_limit
+        else:
+            errors.append('hopLimit must be between 1 and 7')
+
     if 'defaultHeight' in data:
-        simulator.config.HM = float(data['defaultHeight'])
+        height = float(data['defaultHeight'])
+        if 0 <= height <= 1000:
+            simulator.config.HM = height
+        else:
+            errors.append('defaultHeight must be between 0 and 1000 meters')
+
     if 'defaultGain' in data:
-        simulator.config.GL = float(data['defaultGain'])
+        gain = float(data['defaultGain'])
+        if -20 <= gain <= 30:
+            simulator.config.GL = gain
+        else:
+            errors.append('defaultGain must be between -20 and 30 dBi')
+
+    if errors:
+        return jsonify({'status': 'error', 'errors': errors, 'config': simulator.config.to_dict()}), 400
+
     return jsonify({'status': 'ok', 'config': simulator.config.to_dict()})
 
 
@@ -484,6 +527,10 @@ def import_yaml():
         simulator.clear_nodes()
 
         for node_id, node_config in config.items():
+            # Validate required fields
+            if 'x' not in node_config or 'y' not in node_config:
+                return jsonify({'error': f'Node {node_id} missing required x or y coordinate'}), 400
+
             role = 'CLIENT'
             if node_config.get('isRouter'):
                 role = 'ROUTER'
@@ -493,12 +540,12 @@ def import_yaml():
                 role = 'CLIENT_MUTE'
 
             simulator.add_node(
-                x=node_config['x'],
-                y=node_config['y'],
-                z=node_config.get('z', 1.0),
+                x=float(node_config['x']),
+                y=float(node_config['y']),
+                z=float(node_config.get('z', 1.0)),
                 role=role,
-                hop_limit=node_config.get('hopLimit', 3),
-                antenna_gain=node_config.get('antennaGain', 0),
+                hop_limit=int(node_config.get('hopLimit', 3)),
+                antenna_gain=float(node_config.get('antennaGain', 0)),
                 neighbor_info=node_config.get('neighborInfo', False)
             )
 
@@ -537,18 +584,18 @@ def handle_command(data):
         text = args.get('text', 'Test message')
         hop_limit = args.get('hopLimit', 3)
 
-        print(f"[BROADCAST] From node {from_node}, hop_limit={hop_limit}")
+        logger.debug(f"[BROADCAST] From node {from_node}, hop_limit={hop_limit}")
 
         # Simulate broadcast propagation
         result = simulate_broadcast(from_node, hop_limit)
-        print(f"[BROADCAST] Result: received={result.get('totalReceived')}/{result.get('totalNodes')-1}, maxHopsUsed={result.get('maxHopsUsed')} (limit was {hop_limit})")
-        print(f"[BROADCAST] Propagation steps: {len(result.get('propagation', []))}")
+        logger.debug(f"[BROADCAST] Result: received={result.get('totalReceived')}/{result.get('totalNodes')-1}, maxHopsUsed={result.get('maxHopsUsed')} (limit was {hop_limit})")
+        logger.debug(f"[BROADCAST] Propagation steps: {len(result.get('propagation', []))}")
         for step in result.get('propagation', []):
-            print(f"  Hop {step['hop']}: {len(step['transmissions'])} transmissions")
+            logger.debug(f"  Hop {step['hop']}: {len(step['transmissions'])} transmissions")
         # Show which nodes received at which hop
         for n in result.get('nodes', []):
             if n['status'] == 'received':
-                print(f"  Node {n['id']} received at hop {n['hop']} (remaining: {n.get('remaining', '?')})")
+                logger.debug(f"  Node {n['id']} received at hop {n['hop']} (remaining: {n.get('remaining', '?')})")
 
         msg = f'Broadcast from Node {from_node} (hop limit {hop_limit}): {result["totalReceived"]}/{result["totalNodes"]-1} nodes received'
         if result.get('maxHopsUsed', 0) > 0:
@@ -570,7 +617,7 @@ def handle_command(data):
         source_node = simulator.nodes.get(from_node)
         hop_limit = source_node.hop_limit if source_node else 3
 
-        print(f"[DM] From node {from_node} to {to_node}, hop_limit={hop_limit}")
+        logger.debug(f"[DM] From node {from_node} to {to_node}, hop_limit={hop_limit}")
 
         # Simulate direct message routing
         result = simulate_direct_message(from_node, to_node)
@@ -597,7 +644,7 @@ def handle_command(data):
         source_node = simulator.nodes.get(from_node)
         hop_limit = source_node.hop_limit if source_node else 3
 
-        print(f"[TRACEROUTE] From node {from_node} to {to_node}, hop_limit={hop_limit}")
+        logger.debug(f"[TRACEROUTE] From node {from_node} to {to_node}, hop_limit={hop_limit}")
 
         # Simulate traceroute with detailed hop info
         result = simulate_traceroute(from_node, to_node)
@@ -756,11 +803,11 @@ def simulate_direct_message(from_node: int, to_node: int) -> dict:
 
     # Get hop limit from source node
     hop_limit = simulator.nodes[from_node].hop_limit
-    print(f"[DM FLOOD] Starting flood from node {from_node} with hop_limit={hop_limit}")
+    logger.debug(f"[DM FLOOD] Starting flood from node {from_node} with hop_limit={hop_limit}")
 
     # Use flood simulation (same as broadcast) to see how message propagates
     flood_result = simulate_broadcast(from_node, hop_limit)
-    print(f"[DM FLOOD] Flood result: {len(flood_result.get('nodes', []))} nodes reached, {len(flood_result.get('propagation', []))} propagation hops")
+    logger.debug(f"[DM FLOOD] Flood result: {len(flood_result.get('nodes', []))} nodes reached, {len(flood_result.get('propagation', []))} propagation hops")
 
     # Check if destination was reached in the flood
     destination_reached = False
@@ -770,7 +817,7 @@ def simulate_direct_message(from_node: int, to_node: int) -> dict:
             destination_reached = True
             destination_hop = node_info['hop']
             break
-    print(f"[DM FLOOD] Destination {to_node} reached: {destination_reached}, at hop: {destination_hop}")
+    logger.debug(f"[DM FLOOD] Destination {to_node} reached: {destination_reached}, at hop: {destination_hop}")
 
     # If destination was reached, trace back the path
     path = []
@@ -920,7 +967,7 @@ def calculate_route(from_node: int, to_node: int, hop_limit: int = None) -> List
     if hop_limit is None:
         hop_limit = simulator.nodes[from_node].hop_limit
 
-    print(f"[ROUTE] Calculating route from {from_node} to {to_node} with hop_limit={hop_limit}")
+    logger.debug(f"[ROUTE] Calculating route from {from_node} to {to_node} with hop_limit={hop_limit}")
 
     # Build adjacency list
     adj = {n: [] for n in simulator.nodes}
@@ -945,7 +992,7 @@ def calculate_route(from_node: int, to_node: int, hop_limit: int = None) -> List
             continue  # Skip paths that exceed hop limit
 
         if node == to_node:
-            print(f"[ROUTE] Found route: {path} ({len(path)-1} hops)")
+            logger.debug(f"[ROUTE] Found route: {path} ({len(path)-1} hops)")
             return path
 
         # Only explore further if we haven't reached the hop limit
@@ -955,7 +1002,7 @@ def calculate_route(from_node: int, to_node: int, hop_limit: int = None) -> List
                     visited.add(neighbor)
                     queue_list.append(path + [neighbor])
 
-    print(f"[ROUTE] No route found within {hop_limit} hops")
+    logger.debug(f"[ROUTE] No route found within {hop_limit} hops")
     return []  # No route found within hop limit
 
 
