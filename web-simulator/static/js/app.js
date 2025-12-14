@@ -565,6 +565,13 @@ async function loadConfig() {
         if (state.config.pathLossAdjustment !== undefined) {
             document.getElementById('pathloss-adjustment').value = state.config.pathLossAdjustment;
         }
+        if (state.config.terrainEnabled !== undefined) {
+            document.getElementById('terrain-enabled').checked = state.config.terrainEnabled;
+        }
+        // Disable terrain checkbox if not available on server
+        if (state.config.terrainAvailable === false) {
+            document.getElementById('terrain-enabled').disabled = true;
+        }
     } catch (error) {
         log('Failed to load config', 'error');
     }
@@ -2246,11 +2253,12 @@ function applySettings() {
     const width = parseInt(document.getElementById('area-width').value);
     const height = parseInt(document.getElementById('area-height').value);
     const pathLossAdjustment = parseFloat(document.getElementById('pathloss-adjustment').value);
+    const terrainEnabled = document.getElementById('terrain-enabled').checked;
 
     fetch('/api/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model, xsize: width, ysize: height, pathLossAdjustment })
+        body: JSON.stringify({ model, xsize: width, ysize: height, pathLossAdjustment, terrainEnabled })
     }).then(() => {
         log('Settings applied', 'success');
         loadNodes(); // Recalculate coverage and links

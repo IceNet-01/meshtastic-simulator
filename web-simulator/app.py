@@ -40,6 +40,14 @@ import numpy as np
 from lib.config import Config
 from lib import phy
 
+# Import terrain module
+try:
+    from terrain import check_line_of_sight, meters_to_latlon, clear_elevation_cache
+    TERRAIN_AVAILABLE = True
+except ImportError:
+    TERRAIN_AVAILABLE = False
+    logger.warning("Terrain module not available")
+
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'meshtastic-simulator-secret')
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
@@ -70,6 +78,11 @@ class WebSimulatorConfig(Config):
         # Real-world Meshtastic typically achieves 3-8km in suburban areas
         self.PATH_LOSS_ADJUSTMENT = -15.0
 
+        # Terrain/elevation settings
+        self.TERRAIN_ENABLED = False  # Enable terrain-aware LOS calculations
+        self.TERRAIN_REF_LAT = 39.8283  # Reference latitude for meter-to-latlon conversion
+        self.TERRAIN_REF_LON = -98.5795  # Reference longitude (center of USA)
+
     def to_dict(self) -> dict:
         """Convert config to JSON-serializable dict."""
         return {
@@ -82,6 +95,10 @@ class WebSimulatorConfig(Config):
             'region': 'US',
             'modem': self.MODEM,
             'pathLossAdjustment': self.PATH_LOSS_ADJUSTMENT,
+            'terrainEnabled': self.TERRAIN_ENABLED,
+            'terrainRefLat': self.TERRAIN_REF_LAT,
+            'terrainRefLon': self.TERRAIN_REF_LON,
+            'terrainAvailable': TERRAIN_AVAILABLE,
             'pathlossModels': [
                 {'id': 0, 'name': 'Log-distance'},
                 {'id': 1, 'name': 'Okumura-Hata (small/medium cities)'},
@@ -238,11 +255,42 @@ class WebSimulator:
         base_path_loss = phy.estimate_path_loss(self.config, dist, self.config.FREQ, node1.z, node2.z)
         # Apply path loss adjustment (negative values reduce path loss, increasing range)
         path_loss = base_path_loss + self.config.PATH_LOSS_ADJUSTMENT
+
+        # Terrain-based obstruction loss
+        terrain_loss = 0.0
+        terrain_info = None
+        if self.config.TERRAIN_ENABLED and TERRAIN_AVAILABLE:
+            try:
+                # Convert node positions (meters) to lat/lon
+                lat1, lon1 = meters_to_latlon(node1.x, node1.y,
+                                               self.config.TERRAIN_REF_LAT,
+                                               self.config.TERRAIN_REF_LON)
+                lat2, lon2 = meters_to_latlon(node2.x, node2.y,
+                                               self.config.TERRAIN_REF_LAT,
+                                               self.config.TERRAIN_REF_LON)
+
+                # Check line of sight with terrain
+                los_result = check_line_of_sight(
+                    lat1, lon1, node1.z,
+                    lat2, lon2, node2.z,
+                    freq_mhz=self.config.FREQ / 1e6
+                )
+
+                terrain_loss = los_result.get('obstruction_loss', 0)
+                terrain_info = {
+                    'hasLos': los_result.get('has_los', True),
+                    'obstructionLoss': terrain_loss,
+                    'clearanceRatio': los_result.get('clearance_ratio', 1.0)
+                }
+            except Exception as e:
+                logger.warning(f"Terrain check failed: {e}")
+
+        path_loss += terrain_loss
         rssi = self.config.PTX + node1.antenna_gain - path_loss
         snr = rssi - self.config.NOISE_LEVEL
         can_receive = bool(rssi >= self.config.SENSMODEM[self.config.MODEM])
 
-        return {
+        result = {
             'distance': float(round(dist, 1)),
             'pathLoss': float(round(path_loss, 2)),
             'rssi': float(round(rssi, 2)),
@@ -250,6 +298,11 @@ class WebSimulator:
             'canReceive': can_receive,
             'signalQuality': int(self._rssi_to_quality(rssi)) if can_receive else 0
         }
+
+        if terrain_info:
+            result['terrain'] = terrain_info
+
+        return result
 
     def _rssi_to_quality(self, rssi: float) -> int:
         """Convert RSSI to signal quality percentage."""
@@ -433,6 +486,25 @@ def update_config():
             simulator.config.PATH_LOSS_ADJUSTMENT = adjustment
         else:
             errors.append('pathLossAdjustment must be between -30 and 30 dB')
+
+    if 'terrainEnabled' in data:
+        simulator.config.TERRAIN_ENABLED = bool(data['terrainEnabled'])
+        if simulator.config.TERRAIN_ENABLED and TERRAIN_AVAILABLE:
+            clear_elevation_cache()  # Clear cache when enabling
+
+    if 'terrainRefLat' in data:
+        lat = float(data['terrainRefLat'])
+        if -90 <= lat <= 90:
+            simulator.config.TERRAIN_REF_LAT = lat
+        else:
+            errors.append('terrainRefLat must be between -90 and 90')
+
+    if 'terrainRefLon' in data:
+        lon = float(data['terrainRefLon'])
+        if -180 <= lon <= 180:
+            simulator.config.TERRAIN_REF_LON = lon
+        else:
+            errors.append('terrainRefLon must be between -180 and 180')
 
     if errors:
         return jsonify({'status': 'error', 'errors': errors, 'config': simulator.config.to_dict()}), 400
