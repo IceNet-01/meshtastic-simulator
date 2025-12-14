@@ -9,6 +9,7 @@ import os
 import sys
 import json
 import time
+import math
 import logging
 import threading
 import queue
@@ -107,9 +108,21 @@ class SimulatorNode:
         self.antenna_gain = kwargs.get('antenna_gain', 0)
         self.name = kwargs.get('name', f'Node {node_id}')
         self.neighbor_info = kwargs.get('neighbor_info', False)
+        # NodeDB import fields
+        self.source = kwargs.get('source', 'manual')  # 'manual', 'imported', 'simulated'
+        self.meshtastic_id = kwargs.get('meshtastic_id', None)  # Original !hex ID
+        self.short_name = kwargs.get('short_name', None)
+        self.long_name = kwargs.get('long_name', None)
+        self.hw_model = kwargs.get('hw_model', None)
+        self.last_heard = kwargs.get('last_heard', None)
+        self.snr = kwargs.get('snr', None)
+        self.hops_away = kwargs.get('hops_away', None)
+        self.latitude = kwargs.get('latitude', None)
+        self.longitude = kwargs.get('longitude', None)
+        self.battery_level = kwargs.get('battery_level', None)
 
     def to_dict(self) -> dict:
-        return {
+        result = {
             'id': self.node_id,
             'x': self.x,
             'y': self.y,
@@ -118,8 +131,31 @@ class SimulatorNode:
             'hopLimit': self.hop_limit,
             'antennaGain': self.antenna_gain,
             'name': self.name,
-            'neighborInfo': self.neighbor_info
+            'neighborInfo': self.neighbor_info,
+            'source': self.source
         }
+        # Include NodeDB fields if present
+        if self.meshtastic_id:
+            result['meshtasticId'] = self.meshtastic_id
+        if self.short_name:
+            result['shortName'] = self.short_name
+        if self.long_name:
+            result['longName'] = self.long_name
+        if self.hw_model:
+            result['hwModel'] = self.hw_model
+        if self.last_heard:
+            result['lastHeard'] = self.last_heard
+        if self.snr is not None:
+            result['snr'] = self.snr
+        if self.hops_away is not None:
+            result['hopsAway'] = self.hops_away
+        if self.latitude is not None:
+            result['latitude'] = self.latitude
+        if self.longitude is not None:
+            result['longitude'] = self.longitude
+        if self.battery_level is not None:
+            result['batteryLevel'] = self.battery_level
+        return result
 
     def to_meshtasticator_config(self) -> dict:
         """Convert to format expected by Meshtasticator."""
@@ -551,6 +587,313 @@ def import_yaml():
 
         socketio.emit('config_imported', {'nodeCount': len(simulator.nodes)})
         return jsonify({'status': 'ok', 'nodeCount': len(simulator.nodes)})
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 400
+
+
+@app.route('/api/import/nodedb', methods=['POST'])
+def import_nodedb():
+    """
+    Import nodes from a Meshtastic NodeDB JSON export.
+
+    Expected format (from meshtastic python library):
+    {
+        "nodes": {
+            "!12345678": {
+                "num": 12345678,
+                "user": {
+                    "id": "!12345678",
+                    "longName": "Node Name",
+                    "shortName": "ND",
+                    "hwModel": "TBEAM",
+                    "role": "ROUTER"
+                },
+                "position": {
+                    "latitude": 40.7128,
+                    "longitude": -74.0060,
+                    "altitude": 10
+                },
+                "lastHeard": 1702500000,
+                "snr": 10.5,
+                "hopsAway": 1,
+                "deviceMetrics": {
+                    "batteryLevel": 85
+                }
+            }
+        }
+    }
+
+    Filters (optional in request):
+    - requirePosition: bool - only import nodes with valid lat/lon
+    - maxHopsAway: int - only nodes within N hops (null = heard directly by mesh)
+    - lastHeardWithin: int - only nodes heard within N seconds
+    - roles: list - only nodes with specific roles ['ROUTER', 'CLIENT', etc.]
+    - clearExisting: bool - clear existing nodes before import (default: true)
+    """
+    try:
+        data = request.json
+        nodedb = data.get('nodedb', data)  # Support both wrapped and raw format
+        filters = data.get('filters', {})
+
+        # Parse the nodes - handle different formats
+        raw_nodes = {}
+        if 'nodes' in nodedb:
+            raw_nodes = nodedb['nodes']
+        elif isinstance(nodedb, dict):
+            # Check if it's a direct node dict (keys are node IDs)
+            for key, val in nodedb.items():
+                if isinstance(val, dict) and ('user' in val or 'num' in val):
+                    raw_nodes = nodedb
+                    break
+
+        if not raw_nodes:
+            return jsonify({'error': 'No valid nodes found in NodeDB data'}), 400
+
+        # Apply filters
+        require_position = filters.get('requirePosition', True)
+        max_hops = filters.get('maxHopsAway', None)
+        last_heard_within = filters.get('lastHeardWithin', None)
+        allowed_roles = filters.get('roles', None)
+        clear_existing = filters.get('clearExisting', True)
+
+        current_time = time.time()
+
+        # Filter and collect valid nodes
+        valid_nodes = []
+        skipped = {'no_position': 0, 'too_far': 0, 'too_old': 0, 'wrong_role': 0}
+
+        for node_id, node_data in raw_nodes.items():
+            # Extract position
+            position = node_data.get('position', {})
+            lat = position.get('latitude') or position.get('latitudeI', 0) / 1e7
+            lon = position.get('longitude') or position.get('longitudeI', 0) / 1e7
+            alt = position.get('altitude', 1)
+
+            # Filter: require position
+            if require_position and (lat == 0 or lon == 0):
+                skipped['no_position'] += 1
+                continue
+
+            # Filter: hops away
+            hops_away = node_data.get('hopsAway')
+            if max_hops is not None and hops_away is not None and hops_away > max_hops:
+                skipped['too_far'] += 1
+                continue
+
+            # Filter: last heard
+            last_heard = node_data.get('lastHeard', 0)
+            if last_heard_within is not None and last_heard > 0:
+                if current_time - last_heard > last_heard_within:
+                    skipped['too_old'] += 1
+                    continue
+
+            # Extract user info
+            user = node_data.get('user', {})
+            role = user.get('role', 'CLIENT')
+
+            # Filter: roles
+            if allowed_roles and role not in allowed_roles:
+                skipped['wrong_role'] += 1
+                continue
+
+            # Extract device metrics
+            device_metrics = node_data.get('deviceMetrics', {})
+
+            valid_nodes.append({
+                'meshtastic_id': user.get('id') or node_id,
+                'num': node_data.get('num'),
+                'short_name': user.get('shortName'),
+                'long_name': user.get('longName'),
+                'hw_model': user.get('hwModel'),
+                'role': role,
+                'latitude': lat,
+                'longitude': lon,
+                'altitude': alt,
+                'last_heard': last_heard,
+                'snr': node_data.get('snr'),
+                'hops_away': hops_away,
+                'battery_level': device_metrics.get('batteryLevel')
+            })
+
+        if not valid_nodes:
+            return jsonify({
+                'error': 'No nodes passed filters',
+                'skipped': skipped
+            }), 400
+
+        # Calculate center point and convert to local coordinates
+        lats = [n['latitude'] for n in valid_nodes if n['latitude']]
+        lons = [n['longitude'] for n in valid_nodes if n['longitude']]
+
+        if not lats or not lons:
+            return jsonify({'error': 'No nodes with valid positions'}), 400
+
+        center_lat = sum(lats) / len(lats)
+        center_lon = sum(lons) / len(lons)
+
+        # Convert lat/lon to local meter coordinates
+        METERS_PER_DEGREE_LAT = 111320
+        meters_per_degree_lon = METERS_PER_DEGREE_LAT * abs(math.cos(math.radians(center_lat)))
+
+        # Clear existing nodes if requested
+        if clear_existing:
+            simulator.clear_nodes()
+
+        # Import nodes
+        imported_count = 0
+        for node_data in valid_nodes:
+            # Convert to local coordinates (meters from center)
+            x = (node_data['longitude'] - center_lon) * meters_per_degree_lon
+            y = (node_data['latitude'] - center_lat) * METERS_PER_DEGREE_LAT
+
+            # Determine display name
+            name = node_data['long_name'] or node_data['short_name'] or node_data['meshtastic_id']
+
+            # Map Meshtastic roles to simulator roles
+            role_map = {
+                'CLIENT': 'CLIENT',
+                'CLIENT_MUTE': 'CLIENT_MUTE',
+                'CLIENT_HIDDEN': 'CLIENT_MUTE',
+                'ROUTER': 'ROUTER',
+                'ROUTER_CLIENT': 'ROUTER',
+                'REPEATER': 'REPEATER',
+                'TRACKER': 'CLIENT',
+                'SENSOR': 'CLIENT',
+                'TAK': 'CLIENT',
+                'TAK_TRACKER': 'CLIENT',
+                'LOST_AND_FOUND': 'CLIENT',
+            }
+            sim_role = role_map.get(node_data['role'], 'CLIENT')
+
+            simulator.add_node(
+                x=x,
+                y=y,
+                z=node_data['altitude'] or 1.0,
+                role=sim_role,
+                hop_limit=3,  # Default, can be modified later
+                antenna_gain=0,
+                name=name,
+                source='imported',
+                meshtastic_id=node_data['meshtastic_id'],
+                short_name=node_data['short_name'],
+                long_name=node_data['long_name'],
+                hw_model=node_data['hw_model'],
+                last_heard=node_data['last_heard'],
+                snr=node_data['snr'],
+                hops_away=node_data['hops_away'],
+                latitude=node_data['latitude'],
+                longitude=node_data['longitude'],
+                battery_level=node_data['battery_level']
+            )
+            imported_count += 1
+
+        # Update simulator area to fit imported nodes
+        if imported_count > 0:
+            all_x = [n.x for n in simulator.nodes.values()]
+            all_y = [n.y for n in simulator.nodes.values()]
+            margin = 1000  # 1km margin
+            simulator.config.XSIZE = max(10000, (max(all_x) - min(all_x)) + margin * 2)
+            simulator.config.YSIZE = max(10000, (max(all_y) - min(all_y)) + margin * 2)
+
+        socketio.emit('config_imported', {
+            'nodeCount': len(simulator.nodes),
+            'centerLat': center_lat,
+            'centerLon': center_lon
+        })
+
+        return jsonify({
+            'status': 'ok',
+            'imported': imported_count,
+            'skipped': skipped,
+            'center': {'lat': center_lat, 'lon': center_lon},
+            'nodeCount': len(simulator.nodes)
+        })
+
+    except Exception as e:
+        logger.exception("NodeDB import error")
+        return jsonify({'error': str(e)}), 400
+
+
+@app.route('/api/import/nodedb/preview', methods=['POST'])
+def preview_nodedb():
+    """
+    Preview NodeDB import without actually importing.
+    Returns list of nodes that would be imported with current filters.
+    """
+    try:
+        data = request.json
+        nodedb = data.get('nodedb', data)
+        filters = data.get('filters', {})
+
+        raw_nodes = {}
+        if 'nodes' in nodedb:
+            raw_nodes = nodedb['nodes']
+        elif isinstance(nodedb, dict):
+            for key, val in nodedb.items():
+                if isinstance(val, dict) and ('user' in val or 'num' in val):
+                    raw_nodes = nodedb
+                    break
+
+        require_position = filters.get('requirePosition', True)
+        max_hops = filters.get('maxHopsAway', None)
+        last_heard_within = filters.get('lastHeardWithin', None)
+        allowed_roles = filters.get('roles', None)
+
+        current_time = time.time()
+        preview_nodes = []
+        skipped = {'no_position': 0, 'too_far': 0, 'too_old': 0, 'wrong_role': 0}
+
+        for node_id, node_data in raw_nodes.items():
+            position = node_data.get('position', {})
+            lat = position.get('latitude') or position.get('latitudeI', 0) / 1e7
+            lon = position.get('longitude') or position.get('longitudeI', 0) / 1e7
+
+            user = node_data.get('user', {})
+            role = user.get('role', 'CLIENT')
+            hops_away = node_data.get('hopsAway')
+            last_heard = node_data.get('lastHeard', 0)
+
+            # Apply filters and track why nodes are skipped
+            skip_reason = None
+            if require_position and (lat == 0 or lon == 0):
+                skip_reason = 'no_position'
+            elif max_hops is not None and hops_away is not None and hops_away > max_hops:
+                skip_reason = 'too_far'
+            elif last_heard_within is not None and last_heard > 0 and current_time - last_heard > last_heard_within:
+                skip_reason = 'too_old'
+            elif allowed_roles and role not in allowed_roles:
+                skip_reason = 'wrong_role'
+
+            node_preview = {
+                'id': user.get('id') or node_id,
+                'shortName': user.get('shortName'),
+                'longName': user.get('longName'),
+                'role': role,
+                'hwModel': user.get('hwModel'),
+                'hasPosition': lat != 0 and lon != 0,
+                'latitude': lat if lat != 0 else None,
+                'longitude': lon if lon != 0 else None,
+                'hopsAway': hops_away,
+                'lastHeard': last_heard,
+                'snr': node_data.get('snr'),
+                'willImport': skip_reason is None,
+                'skipReason': skip_reason
+            }
+            preview_nodes.append(node_preview)
+
+            if skip_reason:
+                skipped[skip_reason] += 1
+
+        # Sort: importing nodes first, then by name
+        preview_nodes.sort(key=lambda n: (not n['willImport'], n.get('longName') or n.get('shortName') or n['id']))
+
+        return jsonify({
+            'total': len(preview_nodes),
+            'willImport': sum(1 for n in preview_nodes if n['willImport']),
+            'skipped': skipped,
+            'nodes': preview_nodes
+        })
 
     except Exception as e:
         return jsonify({'error': str(e)}), 400

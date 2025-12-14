@@ -13,6 +13,7 @@
         <header class="app-header">
             <h1>Meshtastic Network Simulator</h1>
             <div class="header-actions">
+                <button id="btn-import-nodedb" class="btn btn-primary">Import NodeDB</button>
                 <button id="btn-export" class="btn btn-secondary">Export YAML</button>
                 <button id="btn-import" class="btn btn-secondary">Import YAML</button>
                 <button id="btn-clear" class="btn btn-danger">Clear All</button>
@@ -198,6 +199,86 @@
             <div class="modal-actions">
                 <button id="btn-import-cancel" class="btn btn-secondary">Cancel</button>
                 <button id="btn-import-confirm" class="btn btn-primary">Import</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- NodeDB Import Modal -->
+    <div id="nodedb-modal" class="modal hidden">
+        <div class="modal-content modal-large">
+            <h2>Import from Meshtastic NodeDB</h2>
+            <p class="hint">Paste NodeDB JSON export from Meshtastic Python CLI or app</p>
+
+            <div class="form-group">
+                <label for="nodedb-json">NodeDB JSON</label>
+                <textarea id="nodedb-json" placeholder='{"nodes": {...}}' rows="6"></textarea>
+            </div>
+
+            <div class="nodedb-filters">
+                <h3>Filters</h3>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>
+                            <input type="checkbox" id="filter-require-position" checked>
+                            Require GPS position
+                        </label>
+                    </div>
+                    <div class="form-group">
+                        <label>
+                            <input type="checkbox" id="filter-clear-existing" checked>
+                            Clear existing nodes
+                        </label>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="filter-max-hops">Max Hops Away</label>
+                        <select id="filter-max-hops">
+                            <option value="">Any</option>
+                            <option value="0">Direct only (0)</option>
+                            <option value="1">1 hop</option>
+                            <option value="2">2 hops</option>
+                            <option value="3">3 hops</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="filter-last-heard">Last Heard Within</label>
+                        <select id="filter-last-heard">
+                            <option value="">Any time</option>
+                            <option value="3600">1 hour</option>
+                            <option value="86400">24 hours</option>
+                            <option value="604800">7 days</option>
+                            <option value="2592000">30 days</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>Node Roles</label>
+                    <div class="checkbox-group">
+                        <label><input type="checkbox" class="filter-role" value="CLIENT" checked> Client</label>
+                        <label><input type="checkbox" class="filter-role" value="ROUTER" checked> Router</label>
+                        <label><input type="checkbox" class="filter-role" value="ROUTER_CLIENT" checked> Router Client</label>
+                        <label><input type="checkbox" class="filter-role" value="REPEATER" checked> Repeater</label>
+                        <label><input type="checkbox" class="filter-role" value="TRACKER" checked> Tracker</label>
+                    </div>
+                </div>
+            </div>
+
+            <div id="nodedb-preview" class="nodedb-preview hidden">
+                <h3>Preview (<span id="preview-count">0</span> nodes will be imported)</h3>
+                <div class="preview-stats">
+                    <span class="stat">Total: <span id="preview-total">0</span></span>
+                    <span class="stat skip">No Position: <span id="preview-no-pos">0</span></span>
+                    <span class="stat skip">Too Far: <span id="preview-too-far">0</span></span>
+                    <span class="stat skip">Too Old: <span id="preview-too-old">0</span></span>
+                </div>
+                <div id="preview-list" class="preview-list"></div>
+            </div>
+
+            <div class="modal-actions">
+                <button id="btn-nodedb-preview" class="btn btn-secondary">Preview</button>
+                <button id="btn-nodedb-cancel" class="btn btn-secondary">Cancel</button>
+                <button id="btn-nodedb-import" class="btn btn-primary">Import</button>
             </div>
         </div>
     </div>

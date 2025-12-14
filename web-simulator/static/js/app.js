@@ -328,6 +328,19 @@ function initEventListeners() {
     });
     document.getElementById('btn-import-confirm').addEventListener('click', importYaml);
 
+    // NodeDB Import
+    document.getElementById('btn-import-nodedb').addEventListener('click', () => {
+        document.getElementById('nodedb-modal').classList.remove('hidden');
+        document.getElementById('nodedb-preview').classList.add('hidden');
+    });
+    document.getElementById('btn-nodedb-cancel').addEventListener('click', () => {
+        document.getElementById('nodedb-modal').classList.add('hidden');
+        document.getElementById('nodedb-json').value = '';
+        document.getElementById('nodedb-preview').classList.add('hidden');
+    });
+    document.getElementById('btn-nodedb-preview').addEventListener('click', previewNodeDB);
+    document.getElementById('btn-nodedb-import').addEventListener('click', importNodeDB);
+
     // Edit modal
     document.getElementById('btn-edit-cancel').addEventListener('click', closeEditModal);
     document.getElementById('btn-edit-save').addEventListener('click', saveEditedNode);
@@ -1165,6 +1178,15 @@ function updateNodeList() {
         nodeDetails.textContent = `X: ${Math.round(node.x)}, Y: ${Math.round(node.y)}, H: ${node.z}m`;
 
         nodeInfo.appendChild(nodeName);
+
+        // Add source indicator for imported nodes
+        if (node.source === 'imported') {
+            const sourceSpan = document.createElement('span');
+            sourceSpan.className = 'node-source imported';
+            sourceSpan.textContent = 'imported';
+            nodeInfo.appendChild(sourceSpan);
+        }
+
         nodeInfo.appendChild(nodeDetails);
 
         const nodeRole = document.createElement('span');
@@ -2145,6 +2167,165 @@ function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
+}
+
+// ============== NodeDB Import Functions ==============
+
+function getNodeDBFilters() {
+    const roles = [];
+    document.querySelectorAll('.filter-role:checked').forEach(cb => {
+        roles.push(cb.value);
+    });
+
+    return {
+        requirePosition: document.getElementById('filter-require-position').checked,
+        maxHopsAway: document.getElementById('filter-max-hops').value || null,
+        lastHeardWithin: document.getElementById('filter-last-heard').value || null,
+        roles: roles.length > 0 ? roles : null,
+        clearExisting: document.getElementById('filter-clear-existing').checked
+    };
+}
+
+function previewNodeDB() {
+    const jsonText = document.getElementById('nodedb-json').value.trim();
+    if (!jsonText) {
+        log('Please paste NodeDB JSON data', 'error');
+        return;
+    }
+
+    let nodedb;
+    try {
+        nodedb = JSON.parse(jsonText);
+    } catch (e) {
+        log('Invalid JSON format: ' + e.message, 'error');
+        return;
+    }
+
+    const filters = getNodeDBFilters();
+
+    fetch('/api/import/nodedb/preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ nodedb, filters })
+    })
+    .then(res => res.json())
+    .then(data => {
+        if (data.error) {
+            log('Preview error: ' + data.error, 'error');
+            return;
+        }
+
+        // Update preview stats
+        document.getElementById('preview-count').textContent = data.willImport;
+        document.getElementById('preview-total').textContent = data.total;
+        document.getElementById('preview-no-pos').textContent = data.skipped.no_position || 0;
+        document.getElementById('preview-too-far').textContent = data.skipped.too_far || 0;
+        document.getElementById('preview-too-old').textContent = data.skipped.too_old || 0;
+
+        // Build preview list
+        const listEl = document.getElementById('preview-list');
+        listEl.innerHTML = '';
+
+        data.nodes.forEach(node => {
+            const item = document.createElement('div');
+            item.className = 'preview-node ' + (node.willImport ? 'will-import' : 'will-skip');
+
+            const infoDiv = document.createElement('div');
+            const nameSpan = document.createElement('span');
+            nameSpan.className = 'node-name';
+            nameSpan.textContent = node.longName || node.shortName || node.id;
+            infoDiv.appendChild(nameSpan);
+
+            const detailsSpan = document.createElement('span');
+            detailsSpan.className = 'node-details';
+            const details = [];
+            if (node.role) details.push(node.role);
+            if (node.hopsAway !== null && node.hopsAway !== undefined) details.push(`${node.hopsAway} hops`);
+            if (node.hasPosition) details.push('Has GPS');
+            detailsSpan.textContent = details.join(' | ');
+            infoDiv.appendChild(document.createElement('br'));
+            infoDiv.appendChild(detailsSpan);
+
+            item.appendChild(infoDiv);
+
+            if (!node.willImport && node.skipReason) {
+                const reasonSpan = document.createElement('span');
+                reasonSpan.className = 'skip-reason';
+                const reasons = {
+                    'no_position': 'No GPS',
+                    'too_far': 'Too far',
+                    'too_old': 'Too old',
+                    'wrong_role': 'Filtered role'
+                };
+                reasonSpan.textContent = reasons[node.skipReason] || node.skipReason;
+                item.appendChild(reasonSpan);
+            }
+
+            listEl.appendChild(item);
+        });
+
+        // Show preview section
+        document.getElementById('nodedb-preview').classList.remove('hidden');
+    })
+    .catch(err => {
+        log('Preview failed: ' + err.message, 'error');
+    });
+}
+
+function importNodeDB() {
+    const jsonText = document.getElementById('nodedb-json').value.trim();
+    if (!jsonText) {
+        log('Please paste NodeDB JSON data', 'error');
+        return;
+    }
+
+    let nodedb;
+    try {
+        nodedb = JSON.parse(jsonText);
+    } catch (e) {
+        log('Invalid JSON format: ' + e.message, 'error');
+        return;
+    }
+
+    const filters = getNodeDBFilters();
+
+    fetch('/api/import/nodedb', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ nodedb, filters })
+    })
+    .then(res => res.json())
+    .then(data => {
+        if (data.error) {
+            log('Import error: ' + data.error, 'error');
+            return;
+        }
+
+        // Update map center to the center of imported nodes
+        if (data.center && data.center.lat && data.center.lon) {
+            state.mapCenter = { lat: data.center.lat, lon: data.center.lon };
+        }
+
+        // Close modal and clear form
+        document.getElementById('nodedb-modal').classList.add('hidden');
+        document.getElementById('nodedb-json').value = '';
+        document.getElementById('nodedb-preview').classList.add('hidden');
+
+        // Reload nodes
+        loadNodes();
+
+        log(`Imported ${data.imported} nodes from NodeDB`, 'success');
+        if (data.skipped && Object.values(data.skipped).some(v => v > 0)) {
+            const skippedStr = Object.entries(data.skipped)
+                .filter(([k, v]) => v > 0)
+                .map(([k, v]) => `${v} ${k.replace('_', ' ')}`)
+                .join(', ');
+            log(`Skipped: ${skippedStr}`, 'warning');
+        }
+    })
+    .catch(err => {
+        log('Import failed: ' + err.message, 'error');
+    });
 }
 
 const MAX_LOG_ENTRIES = 500;
