@@ -51,6 +51,25 @@ const METERS_PER_DEGREE_LAT = 111320; // Approximate meters per degree latitude
 // Render loop state
 let renderLoopRunning = false;
 let lastRenderTime = 0;
+let animationFallbackInterval = null;
+
+/**
+ * Start a fallback interval that ensures animations continue
+ * even when requestAnimationFrame is throttled by the browser.
+ */
+function startAnimationFallback() {
+    if (animationFallbackInterval) {
+        clearInterval(animationFallbackInterval);
+    }
+    animationFallbackInterval = setInterval(() => {
+        if (state.animation.active) {
+            startRenderLoop();
+        } else {
+            clearInterval(animationFallbackInterval);
+            animationFallbackInterval = null;
+        }
+    }, 100); // Check every 100ms
+}
 
 /**
  * Restart the render loop for active animations.
@@ -1389,8 +1408,10 @@ function startBroadcastAnimation(simulation) {
         });
     });
 
-    // Start animation loop
+    // Render immediately to show initial state, then start animation loop
+    render();
     renderLoopRunning = true;
+    startAnimationFallback();
     requestAnimationFrame(animateBroadcast);
 }
 
@@ -1502,12 +1523,17 @@ function startDMAnimation(simulation) {
             });
         }
 
+        // Render immediately to show initial state, then start animation loop
+        render();
         renderLoopRunning = true;
+        startAnimationFallback();
         requestAnimationFrame(animateDMFlood);
     } else if (simulation.delivered && simulation.hops && simulation.hops.length > 0) {
         // Fallback to old path-based animation
         state.highlightedRoute = simulation.path || [];
+        render();
         renderLoopRunning = true;
+        startAnimationFallback();
         requestAnimationFrame(animateDM);
     } else {
         log(`DM failed - ${simulation.reason || 'no route available'}`, 'error');
@@ -1684,10 +1710,15 @@ function startTracerouteAnimation(simulation) {
                 });
             });
         }
+        // Render immediately to show initial state, then start animation loop
+        render();
         renderLoopRunning = true;
+        startAnimationFallback();
         requestAnimationFrame(animateTracerouteFlood);
     } else {
+        render();
         renderLoopRunning = true;
+        startAnimationFallback();
         requestAnimationFrame(animateTraceroute);
     }
 }
