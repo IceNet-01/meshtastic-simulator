@@ -537,13 +537,27 @@ def handle_command(data):
         text = args.get('text', 'Test message')
         hop_limit = args.get('hopLimit', 3)
 
+        print(f"[BROADCAST] From node {from_node}, hop_limit={hop_limit}")
+
         # Simulate broadcast propagation
         result = simulate_broadcast(from_node, hop_limit)
+        print(f"[BROADCAST] Result: received={result.get('totalReceived')}/{result.get('totalNodes')-1}, maxHopsUsed={result.get('maxHopsUsed')} (limit was {hop_limit})")
+        print(f"[BROADCAST] Propagation steps: {len(result.get('propagation', []))}")
+        for step in result.get('propagation', []):
+            print(f"  Hop {step['hop']}: {len(step['transmissions'])} transmissions")
+        # Show which nodes received at which hop
+        for n in result.get('nodes', []):
+            if n['status'] == 'received':
+                print(f"  Node {n['id']} received at hop {n['hop']} (remaining: {n.get('remaining', '?')})")
+
+        msg = f'Broadcast from Node {from_node} (hop limit {hop_limit}): {result["totalReceived"]}/{result["totalNodes"]-1} nodes received'
+        if result.get('maxHopsUsed', 0) > 0:
+            msg += f', farthest at hop {result["maxHopsUsed"]}'
 
         emit('command_response', {
             'command': 'broadcast',
             'status': 'success' if result['totalReceived'] > 0 else 'partial',
-            'message': f'Broadcast from Node {from_node}: {result["totalReceived"]}/{result["totalNodes"]-1} nodes received',
+            'message': msg,
             'simulation': result
         }, broadcast=True)
 
@@ -552,13 +566,21 @@ def handle_command(data):
         to_node = args.get('to')
         text = args.get('text', 'Test message')
 
+        # Get hop limit from source node
+        source_node = simulator.nodes.get(from_node)
+        hop_limit = source_node.hop_limit if source_node else 3
+
+        print(f"[DM] From node {from_node} to {to_node}, hop_limit={hop_limit}")
+
         # Simulate direct message routing
         result = simulate_direct_message(from_node, to_node)
 
         status = 'success' if result['delivered'] else 'failed'
-        msg = f'DM {from_node} → {to_node}: {"Delivered" if result["delivered"] else "Failed"}'
+        msg = f'DM {from_node} → {to_node} (hop limit {hop_limit}): {"Delivered" if result["delivered"] else "Failed"}'
         if result['delivered']:
             msg += f' via {len(result["path"])-1} hop(s)'
+        else:
+            msg += f' - {result.get("reason", "unknown reason")}'
 
         emit('command_response', {
             'command': 'dm',
@@ -571,14 +593,20 @@ def handle_command(data):
         from_node = args.get('from')
         to_node = args.get('to')
 
+        # Get hop limit from source node
+        source_node = simulator.nodes.get(from_node)
+        hop_limit = source_node.hop_limit if source_node else 3
+
+        print(f"[TRACEROUTE] From node {from_node} to {to_node}, hop_limit={hop_limit}")
+
         # Simulate traceroute with detailed hop info
         result = simulate_traceroute(from_node, to_node)
 
         if result['reachable']:
             hop_info = ' → '.join([f"{h['node']}({h['rssi']:.0f}dBm)" for h in result['hops']])
-            msg = f'Traceroute {from_node} → {to_node}: {hop_info}'
+            msg = f'Traceroute {from_node} → {to_node} (hop limit {hop_limit}): {hop_info}'
         else:
-            msg = f'Traceroute {from_node} → {to_node}: No route found'
+            msg = f'Traceroute {from_node} → {to_node} (hop limit {hop_limit}): {result.get("reason", "No route found")}'
 
         emit('command_response', {
             'command': 'traceroute',
@@ -597,26 +625,36 @@ def handle_command(data):
 
 
 def simulate_broadcast(from_node: int, hop_limit: int = 3) -> dict:
-    """Simulate a broadcast message propagating through the mesh."""
+    """Simulate a broadcast message propagating through the mesh.
+
+    The hop_limit is the ORIGINAL hop limit set by the source node.
+    Each hop decrements the remaining hops. When remaining hops = 0,
+    nodes receive but don't rebroadcast.
+    """
     if from_node not in simulator.nodes:
         return {'error': 'Source node not found', 'totalReceived': 0, 'totalNodes': 0, 'propagation': []}
 
     source = simulator.nodes[from_node]
     all_nodes = list(simulator.nodes.keys())
 
-    # Track which nodes received the message and when (hop count)
-    received = {from_node: {'hop': 0, 'rssi': 0, 'from': None}}
+    # Track which nodes received the message, at which hop, and remaining hops
+    # remaining_hops = hop_limit - hops_traveled
+    received = {from_node: {'hop': 0, 'rssi': 0, 'from': None, 'remaining': hop_limit}}
     propagation = []  # List of propagation steps for animation
 
-    # Simulate hop-by-hop propagation
+    # Frontier contains (node_id, remaining_hops) - remaining hops AFTER this node received
+    frontier = [(from_node, hop_limit)]
     current_hop = 0
-    frontier = [from_node]
 
-    while current_hop < hop_limit and frontier:
+    while frontier and current_hop < 10:  # Safety limit
         next_frontier = []
         hop_transmissions = []
 
-        for tx_node_id in frontier:
+        for tx_node_id, remaining_hops in frontier:
+            # If remaining hops is 0, this node received but won't rebroadcast
+            if remaining_hops <= 0:
+                continue
+
             tx_node = simulator.nodes[tx_node_id]
 
             # Check which nodes can hear this transmission
@@ -629,24 +667,31 @@ def simulate_broadcast(from_node: int, hop_limit: int = 3) -> dict:
                 # Check if can receive
                 link = simulator.calculate_link_quality(tx_node, rx_node)
                 if link['canReceive']:
+                    # Remaining hops for this received message is one less than transmitter had
+                    new_remaining = remaining_hops - 1
+
                     received[rx_node_id] = {
                         'hop': current_hop + 1,
                         'rssi': link['rssi'],
                         'snr': link['snr'],
-                        'from': tx_node_id
+                        'from': tx_node_id,
+                        'remaining': new_remaining
                     }
                     hop_transmissions.append({
                         'from': tx_node_id,
                         'to': rx_node_id,
                         'rssi': float(link['rssi']),
                         'snr': float(link['snr']),
-                        'distance': float(link['distance'])
+                        'distance': float(link['distance']),
+                        'remainingHops': new_remaining
                     })
 
-                    # Only routers/repeaters rebroadcast, not client_mute
+                    # Only add to frontier if:
+                    # 1. Role allows rebroadcast (not CLIENT_MUTE)
+                    # 2. There are remaining hops to forward
                     role = rx_node.role
-                    if role in ['ROUTER', 'REPEATER', 'CLIENT']:
-                        next_frontier.append(rx_node_id)
+                    if role in ['ROUTER', 'REPEATER', 'CLIENT'] and new_remaining > 0:
+                        next_frontier.append((rx_node_id, new_remaining))
 
         if hop_transmissions:
             propagation.append({
@@ -657,11 +702,15 @@ def simulate_broadcast(from_node: int, hop_limit: int = 3) -> dict:
         frontier = next_frontier
         current_hop += 1
 
+        # Stop if no more nodes to process
+        if not frontier:
+            break
+
     # Build result
     node_results = []
     for node_id in all_nodes:
         if node_id == from_node:
-            node_results.append({'id': node_id, 'status': 'source', 'hop': 0})
+            node_results.append({'id': node_id, 'status': 'source', 'hop': 0, 'remaining': hop_limit})
         elif node_id in received:
             r = received[node_id]
             node_results.append({
@@ -670,14 +719,19 @@ def simulate_broadcast(from_node: int, hop_limit: int = 3) -> dict:
                 'hop': r['hop'],
                 'rssi': float(r['rssi']),
                 'snr': float(r['snr']),
-                'from': r['from']
+                'from': r['from'],
+                'remaining': r.get('remaining', 0)
             })
         else:
             node_results.append({'id': node_id, 'status': 'unreached', 'hop': -1})
 
+    # Count actual propagation hops (should be <= hop_limit)
+    max_hop = max((r['hop'] for r in received.values()), default=0)
+
     return {
         'source': from_node,
         'hopLimit': hop_limit,
+        'maxHopsUsed': max_hop,
         'totalNodes': len(all_nodes),
         'totalReceived': len(received) - 1,  # Exclude source
         'nodes': node_results,
@@ -686,97 +740,187 @@ def simulate_broadcast(from_node: int, hop_limit: int = 3) -> dict:
 
 
 def simulate_direct_message(from_node: int, to_node: int) -> dict:
-    """Simulate a direct message with acknowledgment."""
-    path = calculate_route(from_node, to_node)
+    """Simulate a direct message using Meshtastic flooding.
 
-    if not path:
+    The message floods out in all directions (like broadcast) but we track
+    whether it reaches the specific destination within the hop limit.
+    """
+    if from_node not in simulator.nodes or to_node not in simulator.nodes:
         return {
             'delivered': False,
             'path': [],
             'hops': [],
-            'reason': 'No route available'
+            'propagation': [],
+            'reason': 'Node not found'
         }
 
-    # Calculate link quality for each hop
+    # Get hop limit from source node
+    hop_limit = simulator.nodes[from_node].hop_limit
+    print(f"[DM FLOOD] Starting flood from node {from_node} with hop_limit={hop_limit}")
+
+    # Use flood simulation (same as broadcast) to see how message propagates
+    flood_result = simulate_broadcast(from_node, hop_limit)
+    print(f"[DM FLOOD] Flood result: {len(flood_result.get('nodes', []))} nodes reached, {len(flood_result.get('propagation', []))} propagation hops")
+
+    # Check if destination was reached in the flood
+    destination_reached = False
+    destination_hop = -1
+    for node_info in flood_result.get('nodes', []):
+        if node_info['id'] == to_node and node_info['status'] == 'received':
+            destination_reached = True
+            destination_hop = node_info['hop']
+            break
+    print(f"[DM FLOOD] Destination {to_node} reached: {destination_reached}, at hop: {destination_hop}")
+
+    # If destination was reached, trace back the path
+    path = []
     hops = []
-    for i in range(len(path) - 1):
-        n1 = simulator.nodes[path[i]]
-        n2 = simulator.nodes[path[i + 1]]
-        link = simulator.calculate_link_quality(n1, n2)
-        hops.append({
-            'from': path[i],
-            'to': path[i + 1],
-            'rssi': float(link['rssi']),
-            'snr': float(link['snr']),
-            'distance': float(link['distance']),
-            'quality': int(link['signalQuality'])
-        })
+    if destination_reached:
+        # Reconstruct path from propagation data
+        path = reconstruct_path(flood_result, from_node, to_node)
+
+        # Build hop details for the path
+        for i in range(len(path) - 1):
+            n1 = simulator.nodes[path[i]]
+            n2 = simulator.nodes[path[i + 1]]
+            link = simulator.calculate_link_quality(n1, n2)
+            hops.append({
+                'from': path[i],
+                'to': path[i + 1],
+                'rssi': float(link['rssi']),
+                'snr': float(link['snr']),
+                'distance': float(link['distance']),
+                'quality': int(link['signalQuality'])
+            })
 
     return {
-        'delivered': True,
+        'delivered': destination_reached,
+        'source': from_node,
+        'destination': to_node,
         'path': path,
         'hops': hops,
-        'totalHops': len(path) - 1
+        'totalHops': len(path) - 1 if path else 0,
+        'propagation': flood_result.get('propagation', []),
+        'floodResult': flood_result,
+        'hopLimit': hop_limit,
+        'reason': None if destination_reached else f'Message died after {hop_limit} hops - destination not reached'
     }
 
 
-def simulate_traceroute(from_node: int, to_node: int) -> dict:
-    """Simulate traceroute with detailed hop information."""
-    path = calculate_route(from_node, to_node)
+def reconstruct_path(flood_result: dict, from_node: int, to_node: int) -> List[int]:
+    """Reconstruct the path a message took from source to destination."""
+    # Build a map of node -> who it received from
+    received_from = {}
+    for node_info in flood_result.get('nodes', []):
+        if node_info.get('from') is not None:
+            received_from[node_info['id']] = node_info['from']
 
-    if not path:
+    # Trace back from destination to source
+    path = [to_node]
+    current = to_node
+    while current != from_node and current in received_from:
+        current = received_from[current]
+        path.insert(0, current)
+
+    # Verify we reached the source
+    if path[0] != from_node:
+        return []
+
+    return path
+
+
+def simulate_traceroute(from_node: int, to_node: int) -> dict:
+    """Simulate traceroute using Meshtastic flooding.
+
+    Like DM, traceroute floods out and we track where it reaches.
+    Shows the full propagation even if destination isn't reached.
+    """
+    if from_node not in simulator.nodes or to_node not in simulator.nodes:
         return {
             'reachable': False,
             'path': [],
             'hops': [],
-            'reason': 'Destination unreachable'
+            'propagation': [],
+            'reason': 'Node not found'
         }
 
-    # Build detailed hop information
+    # Get hop limit from source node
+    hop_limit = simulator.nodes[from_node].hop_limit
+
+    # Use flood simulation to see how message propagates
+    flood_result = simulate_broadcast(from_node, hop_limit)
+
+    # Check if destination was reached
+    destination_reached = False
+    for node_info in flood_result.get('nodes', []):
+        if node_info['id'] == to_node and node_info['status'] == 'received':
+            destination_reached = True
+            break
+
+    # Build path and hop details
+    path = []
     hops = []
     total_latency = 0
 
-    for i, node_id in enumerate(path):
-        node = simulator.nodes[node_id]
-        hop_info = {
-            'node': node_id,
-            'name': node.name,
-            'hop': i,
-            'role': node.role
-        }
+    if destination_reached:
+        path = reconstruct_path(flood_result, from_node, to_node)
 
-        if i > 0:
-            prev_node = simulator.nodes[path[i - 1]]
-            link = simulator.calculate_link_quality(prev_node, node)
-            hop_info['rssi'] = float(link['rssi'])
-            hop_info['snr'] = float(link['snr'])
-            hop_info['distance'] = float(link['distance'])
-            hop_info['quality'] = int(link['signalQuality'])
-            # Estimate latency based on distance (speed of light + processing)
-            latency = link['distance'] / 300000 * 1000 + 50  # ms
-            hop_info['latency'] = float(round(latency, 1))
-            total_latency += latency
-        else:
-            hop_info['rssi'] = 0
-            hop_info['snr'] = 0
-            hop_info['distance'] = 0
-            hop_info['latency'] = 0
+        for i, node_id in enumerate(path):
+            node = simulator.nodes[node_id]
+            hop_info = {
+                'node': node_id,
+                'name': node.name,
+                'hop': i,
+                'role': node.role
+            }
 
-        hops.append(hop_info)
+            if i > 0:
+                prev_node = simulator.nodes[path[i - 1]]
+                link = simulator.calculate_link_quality(prev_node, node)
+                hop_info['rssi'] = float(link['rssi'])
+                hop_info['snr'] = float(link['snr'])
+                hop_info['distance'] = float(link['distance'])
+                hop_info['quality'] = int(link['signalQuality'])
+                latency = link['distance'] / 300000 * 1000 + 50
+                hop_info['latency'] = float(round(latency, 1))
+                total_latency += latency
+            else:
+                hop_info['rssi'] = 0
+                hop_info['snr'] = 0
+                hop_info['distance'] = 0
+                hop_info['latency'] = 0
+
+            hops.append(hop_info)
 
     return {
-        'reachable': True,
+        'reachable': destination_reached,
+        'source': from_node,
+        'destination': to_node,
         'path': path,
         'hops': hops,
-        'totalHops': len(path) - 1,
-        'totalLatency': float(round(total_latency, 1))
+        'totalHops': len(path) - 1 if path else 0,
+        'totalLatency': float(round(total_latency, 1)),
+        'propagation': flood_result.get('propagation', []),
+        'floodResult': flood_result,
+        'hopLimit': hop_limit,
+        'reason': None if destination_reached else f'Message died after {hop_limit} hops - destination not reached'
     }
 
 
-def calculate_route(from_node: int, to_node: int) -> List[int]:
-    """Calculate a simple route between two nodes (BFS)."""
+def calculate_route(from_node: int, to_node: int, hop_limit: int = None) -> List[int]:
+    """Calculate a route between two nodes (BFS) respecting hop limit.
+
+    If hop_limit is provided, only returns routes within that many hops.
+    If hop_limit is None, uses the source node's configured hop limit.
+    """
     if from_node not in simulator.nodes or to_node not in simulator.nodes:
         return []
+
+    # Get hop limit from source node if not specified
+    if hop_limit is None:
+        hop_limit = simulator.nodes[from_node].hop_limit
+
+    print(f"[ROUTE] Calculating route from {from_node} to {to_node} with hop_limit={hop_limit}")
 
     # Build adjacency list
     adj = {n: [] for n in simulator.nodes}
@@ -787,7 +931,7 @@ def calculate_route(from_node: int, to_node: int) -> List[int]:
                 if quality['canReceive']:
                     adj[n1_id].append(n2_id)
 
-    # BFS
+    # BFS with hop limit
     visited = {from_node}
     queue_list = [[from_node]]
 
@@ -795,15 +939,24 @@ def calculate_route(from_node: int, to_node: int) -> List[int]:
         path = queue_list.pop(0)
         node = path[-1]
 
+        # Check if we've exceeded hop limit (path length - 1 = number of hops)
+        current_hops = len(path) - 1
+        if current_hops > hop_limit:
+            continue  # Skip paths that exceed hop limit
+
         if node == to_node:
+            print(f"[ROUTE] Found route: {path} ({len(path)-1} hops)")
             return path
 
-        for neighbor in adj[node]:
-            if neighbor not in visited:
-                visited.add(neighbor)
-                queue_list.append(path + [neighbor])
+        # Only explore further if we haven't reached the hop limit
+        if current_hops < hop_limit:
+            for neighbor in adj[node]:
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    queue_list.append(path + [neighbor])
 
-    return []  # No route found
+    print(f"[ROUTE] No route found within {hop_limit} hops")
+    return []  # No route found within hop limit
 
 
 if __name__ == '__main__':

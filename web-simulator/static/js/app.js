@@ -1214,20 +1214,24 @@ async function deleteEditedNode() {
 
 // ============== Commands ==============
 function sendBroadcast() {
-    const fromNode = parseInt(document.getElementById('cmd-broadcast-from').value);
+    const fromNodeId = parseInt(document.getElementById('cmd-broadcast-from').value);
     const text = document.getElementById('cmd-broadcast-text').value || 'Test message';
 
-    if (isNaN(fromNode)) {
+    if (isNaN(fromNodeId)) {
         log('Please add nodes first and select a source node', 'error');
         return;
     }
 
-    console.log('Sending broadcast:', { from: fromNode, text });
-    log(`Sending broadcast from Node ${fromNode}...`, 'info');
+    // Get hop limit from source node
+    const sourceNode = getNodeById(fromNodeId);
+    const hopLimit = sourceNode ? (sourceNode.hopLimit || 3) : 3;
+
+    console.log('Sending broadcast:', { from: fromNodeId, text, hopLimit });
+    log(`Sending broadcast from Node ${fromNodeId} (hop limit: ${hopLimit})...`, 'info');
 
     state.socket.emit('send_command', {
         command: 'broadcast',
-        args: { from: fromNode, text }
+        args: { from: fromNodeId, text, hopLimit }
     });
 }
 
@@ -1269,7 +1273,34 @@ function sendTraceroute() {
 }
 
 // ============== Animation Functions ==============
+
+// Helper to get node by ID (handles type mismatches)
+function getNodeById(id) {
+    // Try direct lookup first
+    let node = state.nodes.get(id);
+    if (node) return node;
+
+    // Try as number
+    node = state.nodes.get(Number(id));
+    if (node) return node;
+
+    // Try as string
+    node = state.nodes.get(String(id));
+    if (node) return node;
+
+    // Search through all nodes
+    for (const [key, n] of state.nodes) {
+        if (n.id === id || n.id === Number(id) || String(n.id) === String(id)) {
+            return n;
+        }
+    }
+
+    return null;
+}
+
 function startBroadcastAnimation(simulation) {
+    console.log('Starting broadcast animation:', simulation);
+
     // Reset animation state
     state.animation = {
         active: true,
@@ -1312,8 +1343,8 @@ function animateBroadcast(timestamp) {
     if (currentHop < propagation.length) {
         const hopData = propagation[currentHop];
         hopData.transmissions.forEach(tx => {
-            const fromNode = state.nodes.get(tx.from);
-            const toNode = state.nodes.get(tx.to);
+            const fromNode = getNodeById(tx.from);
+            const toNode = getNodeById(tx.to);
             if (fromNode && toNode) {
                 state.animation.packets.push({
                     fromX: fromNode.x,
@@ -1323,6 +1354,8 @@ function animateBroadcast(timestamp) {
                     progress: hopProgress,
                     rssi: tx.rssi
                 });
+            } else {
+                console.warn('Could not find nodes for broadcast hop:', tx.from, '->', tx.to);
             }
         });
 
@@ -1363,6 +1396,15 @@ function animateBroadcast(timestamp) {
 }
 
 function startDMAnimation(simulation) {
+    console.log('Starting DM animation:', simulation);
+
+    // DM now uses flood propagation like broadcast
+    // Show the flood, then highlight the path to destination (if reached)
+
+    // Get target node from destination field (works even when path is empty)
+    const targetNode = simulation.destination !== undefined ? simulation.destination :
+                       (simulation.path && simulation.path.length > 0 ? simulation.path[simulation.path.length - 1] : null);
+
     state.animation = {
         active: true,
         type: 'dm',
@@ -1370,16 +1412,117 @@ function startDMAnimation(simulation) {
         startTime: performance.now(),
         packets: [],
         nodeStates: new Map(),
-        currentHop: 0
+        currentHop: 0,
+        destinationReached: simulation.delivered,
+        targetNode: targetNode
     };
 
-    // Set path highlight
-    state.highlightedRoute = simulation.path;
+    // If we have flood/propagation data, use broadcast-style animation
+    if (simulation.propagation && simulation.propagation.length > 0) {
+        // Set up node states from flood result
+        const floodResult = simulation.floodResult || simulation;
+        if (floodResult.nodes) {
+            floodResult.nodes.forEach(n => {
+                state.animation.nodeStates.set(n.id, {
+                    status: n.status,
+                    hop: n.hop,
+                    rssi: n.rssi || 0,
+                    pulsePhase: 0,
+                    isTarget: n.id === state.animation.targetNode
+                });
+            });
+        }
 
-    requestAnimationFrame(animateDM);
+        requestAnimationFrame(animateDMFlood);
+    } else if (simulation.delivered && simulation.hops && simulation.hops.length > 0) {
+        // Fallback to old path-based animation
+        state.highlightedRoute = simulation.path || [];
+        requestAnimationFrame(animateDM);
+    } else {
+        log(`DM failed - ${simulation.reason || 'no route available'}`, 'error');
+        state.animation.active = false;
+    }
+}
+
+function animateDMFlood(timestamp) {
+    // DM flood animation - shows message flooding out in all directions
+    if (!state.animation.active || state.animation.type !== 'dm') return;
+
+    const elapsed = timestamp - state.animation.startTime;
+    const hopDuration = 1000;
+    const currentHop = Math.floor(elapsed / hopDuration);
+    const hopProgress = (elapsed % hopDuration) / hopDuration;
+
+    const simulation = state.animation.data;
+    const propagation = simulation.propagation || [];
+
+    // Update packets for current hop
+    state.animation.packets = [];
+
+    if (currentHop < propagation.length) {
+        const hopData = propagation[currentHop];
+        hopData.transmissions.forEach(tx => {
+            const fromNode = getNodeById(tx.from);
+            const toNode = getNodeById(tx.to);
+            if (fromNode && toNode) {
+                state.animation.packets.push({
+                    fromX: fromNode.x,
+                    fromY: fromNode.y,
+                    toX: toNode.x,
+                    toY: toNode.y,
+                    progress: hopProgress,
+                    rssi: tx.rssi,
+                    isDM: true
+                });
+            }
+        });
+
+        // Update node states
+        if (hopProgress > 0.8) {
+            hopData.transmissions.forEach(tx => {
+                const nodeState = state.animation.nodeStates.get(tx.to);
+                if (nodeState && nodeState.status !== 'received') {
+                    nodeState.status = 'receiving';
+                    nodeState.pulsePhase = 1;
+                }
+            });
+        }
+    }
+
+    // Update pulse phases
+    state.animation.nodeStates.forEach((nodeState) => {
+        if (nodeState.pulsePhase > 0) {
+            nodeState.pulsePhase = Math.max(0, nodeState.pulsePhase - 0.02);
+        }
+    });
+
+    state.animation.currentHop = currentHop;
+    render();
+
+    // Continue or end animation
+    const totalDuration = (propagation.length + 1) * hopDuration + 2000;
+    if (elapsed < totalDuration) {
+        requestAnimationFrame(animateDMFlood);
+    } else {
+        // Show final result
+        if (state.animation.destinationReached) {
+            state.highlightedRoute = simulation.path;
+            log(`DM delivered to destination via ${simulation.path.length - 1} hops`, 'success');
+        } else {
+            log(`DM FAILED - message died after ${simulation.hopLimit} hops, destination not reached`, 'error');
+        }
+
+        setTimeout(() => {
+            state.animation.active = false;
+            state.animation.packets = [];
+            state.highlightedRoute = null;
+            render();
+        }, 2000);
+    }
 }
 
 function animateDM(timestamp) {
+    // Legacy path-based DM animation (fallback)
     if (!state.animation.active || state.animation.type !== 'dm') return;
 
     const elapsed = timestamp - state.animation.startTime;
@@ -1396,8 +1539,8 @@ function animateDM(timestamp) {
 
         if (currentHopIndex < hops.length) {
             const hop = hops[currentHopIndex];
-            const fromNode = state.nodes.get(hop.from);
-            const toNode = state.nodes.get(hop.to);
+            const fromNode = getNodeById(hop.from);
+            const toNode = getNodeById(hop.to);
 
             if (fromNode && toNode) {
                 state.animation.packets.push({
@@ -1409,6 +1552,8 @@ function animateDM(timestamp) {
                     rssi: hop.rssi,
                     isDM: true
                 });
+            } else {
+                console.warn('Could not find nodes for DM hop:', hop.from, '->', hop.to, 'Available nodes:', Array.from(state.nodes.keys()));
             }
         }
     }
@@ -1430,6 +1575,12 @@ function animateDM(timestamp) {
 }
 
 function startTracerouteAnimation(simulation) {
+    console.log('Starting traceroute animation:', simulation);
+
+    // Get target node from destination field (works even when path is empty)
+    const targetNode = simulation.destination !== undefined ? simulation.destination :
+                       (simulation.path && simulation.path.length > 0 ? simulation.path[simulation.path.length - 1] : null);
+
     state.animation = {
         active: true,
         type: 'traceroute',
@@ -1438,15 +1589,107 @@ function startTracerouteAnimation(simulation) {
         packets: [],
         nodeStates: new Map(),
         currentHop: 0,
-        discoveredHops: []
+        discoveredHops: [],
+        destinationReached: simulation.reachable,
+        targetNode: targetNode
     };
 
     state.highlightedRoute = [];
 
-    requestAnimationFrame(animateTraceroute);
+    // If we have flood/propagation data, use flood-style animation
+    if (simulation.propagation && simulation.propagation.length > 0) {
+        const floodResult = simulation.floodResult || simulation;
+        if (floodResult.nodes) {
+            floodResult.nodes.forEach(n => {
+                state.animation.nodeStates.set(n.id, {
+                    status: n.status,
+                    hop: n.hop,
+                    rssi: n.rssi || 0,
+                    pulsePhase: 0,
+                    isTarget: n.id === targetNode
+                });
+            });
+        }
+        requestAnimationFrame(animateTracerouteFlood);
+    } else {
+        requestAnimationFrame(animateTraceroute);
+    }
+}
+
+function animateTracerouteFlood(timestamp) {
+    // Traceroute flood animation - shows message flooding out
+    if (!state.animation.active || state.animation.type !== 'traceroute') return;
+
+    const elapsed = timestamp - state.animation.startTime;
+    const hopDuration = 800;
+    const currentHop = Math.floor(elapsed / hopDuration);
+    const hopProgress = (elapsed % hopDuration) / hopDuration;
+
+    const simulation = state.animation.data;
+    const propagation = simulation.propagation || [];
+
+    state.animation.packets = [];
+
+    if (currentHop < propagation.length) {
+        const hopData = propagation[currentHop];
+        hopData.transmissions.forEach(tx => {
+            const fromNode = getNodeById(tx.from);
+            const toNode = getNodeById(tx.to);
+            if (fromNode && toNode) {
+                state.animation.packets.push({
+                    fromX: fromNode.x,
+                    fromY: fromNode.y,
+                    toX: toNode.x,
+                    toY: toNode.y,
+                    progress: hopProgress,
+                    rssi: tx.rssi,
+                    isTraceroute: true
+                });
+            }
+        });
+
+        if (hopProgress > 0.8) {
+            hopData.transmissions.forEach(tx => {
+                const nodeState = state.animation.nodeStates.get(tx.to);
+                if (nodeState && nodeState.status !== 'received') {
+                    nodeState.status = 'receiving';
+                    nodeState.pulsePhase = 1;
+                }
+            });
+        }
+    }
+
+    state.animation.nodeStates.forEach((nodeState) => {
+        if (nodeState.pulsePhase > 0) {
+            nodeState.pulsePhase = Math.max(0, nodeState.pulsePhase - 0.02);
+        }
+    });
+
+    state.animation.currentHop = currentHop;
+    render();
+
+    const totalDuration = (propagation.length + 1) * hopDuration + 2000;
+    if (elapsed < totalDuration) {
+        requestAnimationFrame(animateTracerouteFlood);
+    } else {
+        if (state.animation.destinationReached) {
+            state.highlightedRoute = simulation.path;
+            log(`Traceroute completed - destination reached in ${simulation.path.length - 1} hops`, 'success');
+        } else {
+            log(`Traceroute FAILED - message died after ${simulation.hopLimit} hops, destination not reached`, 'error');
+        }
+
+        setTimeout(() => {
+            state.animation.active = false;
+            state.animation.packets = [];
+            state.highlightedRoute = null;
+            render();
+        }, 3000);
+    }
 }
 
 function animateTraceroute(timestamp) {
+    // Legacy traceroute animation (fallback)
     if (!state.animation.active || state.animation.type !== 'traceroute') return;
 
     const elapsed = timestamp - state.animation.startTime;
@@ -1469,8 +1712,8 @@ function animateTraceroute(timestamp) {
         if (currentHopIndex < hops.length - 1) {
             const fromHop = hops[currentHopIndex];
             const toHop = hops[currentHopIndex + 1];
-            const fromNode = state.nodes.get(fromHop.node);
-            const toNode = state.nodes.get(toHop.node);
+            const fromNode = getNodeById(fromHop.node);
+            const toNode = getNodeById(toHop.node);
 
             if (fromNode && toNode) {
                 state.animation.packets.push({
@@ -1482,6 +1725,8 @@ function animateTraceroute(timestamp) {
                     rssi: toHop.rssi,
                     isTraceroute: true
                 });
+            } else {
+                console.warn('Could not find nodes for traceroute hop:', fromHop.node, '->', toHop.node);
             }
 
             // Log hop discovery
@@ -1565,10 +1810,10 @@ function drawAnimations() {
         }
     });
 
-    // Draw node status indicators for broadcast animation
-    if (state.animation.type === 'broadcast') {
+    // Draw node status indicators for broadcast/DM/traceroute animations
+    if (state.animation.type === 'broadcast' || state.animation.type === 'dm' || state.animation.type === 'traceroute') {
         state.animation.nodeStates.forEach((nodeState, nodeId) => {
-            const node = state.nodes.get(nodeId);
+            const node = getNodeById(nodeId);
             if (!node) return;
 
             const pos = worldToScreen(node.x, node.y);
@@ -1582,22 +1827,36 @@ function drawAnimations() {
                 ctx.lineWidth = 3;
                 ctx.stroke();
             } else if (nodeState.status === 'received' || nodeState.status === 'receiving') {
-                // Received indicator - green ring
+                // Received indicator - green ring (or highlight if it's the target)
                 const alpha = nodeState.pulsePhase > 0 ? nodeState.pulsePhase : 0.5;
+                const isTarget = nodeState.isTarget;
+
                 ctx.beginPath();
                 ctx.arc(pos.x, pos.y, 20, 0, Math.PI * 2);
-                ctx.strokeStyle = `rgba(0, 255, 100, ${alpha})`;
-                ctx.lineWidth = 2;
+                if (isTarget) {
+                    ctx.strokeStyle = `rgba(0, 255, 255, ${alpha + 0.3})`;  // Cyan for target
+                    ctx.lineWidth = 4;
+                } else {
+                    ctx.strokeStyle = `rgba(0, 255, 100, ${alpha})`;
+                    ctx.lineWidth = 2;
+                }
                 ctx.stroke();
 
                 // Show hop count
                 ctx.font = 'bold 10px sans-serif';
-                ctx.fillStyle = '#00ff64';
+                ctx.fillStyle = isTarget ? '#00ffff' : '#00ff64';
                 ctx.textAlign = 'center';
                 ctx.fillText(`H${nodeState.hop}`, pos.x, pos.y - 22);
+
+                // Mark target with a star/indicator
+                if (isTarget) {
+                    ctx.fillStyle = '#00ffff';
+                    ctx.fillText('★ TARGET', pos.x, pos.y + 30);
+                }
             } else if (nodeState.status === 'unreached') {
                 // Unreached indicator - red X (only show after animation mostly done)
-                if (state.animation.currentHop >= (state.animation.data.propagation?.length || 0)) {
+                const propagationLength = state.animation.data.propagation?.length || 0;
+                if (state.animation.currentHop >= propagationLength) {
                     ctx.strokeStyle = 'rgba(255, 50, 50, 0.7)';
                     ctx.lineWidth = 2;
                     ctx.beginPath();
@@ -1606,6 +1865,14 @@ function drawAnimations() {
                     ctx.moveTo(pos.x + 8, pos.y - 8);
                     ctx.lineTo(pos.x - 8, pos.y + 8);
                     ctx.stroke();
+
+                    // If this is the target that wasn't reached, show it clearly
+                    if (nodeState.isTarget) {
+                        ctx.fillStyle = '#ff3333';
+                        ctx.font = 'bold 10px sans-serif';
+                        ctx.textAlign = 'center';
+                        ctx.fillText('✗ TARGET NOT REACHED', pos.x, pos.y + 30);
+                    }
                 }
             }
         });
