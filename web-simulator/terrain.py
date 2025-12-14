@@ -200,6 +200,19 @@ def check_line_of_sight(lat1: float, lon1: float, height1: float,
     # Calculate total distance
     distance_m = haversine_distance(lat1, lon1, lat2, lon2)
 
+    # Handle zero or very small distances (same location or very close nodes)
+    if distance_m < 1.0:  # Less than 1 meter
+        return {
+            "has_los": True,
+            "obstruction_loss": 0,
+            "clearance_ratio": 1.0,
+            "terrain_profile": None,
+            "worst_clearance": None,
+            "distance_m": distance_m,
+            "tx_elevation_asl": (elevations[0] or 0) + height1,
+            "rx_elevation_asl": (elevations[-1] or 0) + height2
+        }
+
     # Get endpoint elevations (ground level)
     elev1 = elevations[0] if elevations[0] is not None else 0
     elev2 = elevations[-1] if elevations[-1] is not None else 0
