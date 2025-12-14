@@ -10,7 +10,7 @@ Built as a wrapper around [Meshtasticator](https://github.com/meshtastic/Meshtas
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
 ## Features
-
+/Recording%202025-12-14%20142541.mp4
 ### Visual Network Design
 - **Interactive Map Canvas** - OpenStreetMap background with drag-to-position nodes
 - **Click-to-Add Nodes** - Double-click anywhere to place nodes
