@@ -867,7 +867,7 @@ def import_nodedb():
 
         # Default node settings (overridable via filters)
         default_height = float(filters.get('defaultHeight', 2.0))  # Default 2m height
-        default_antenna_gain = float(filters.get('defaultAntennaGain', 0.0))  # 0 dBi default
+        default_antenna_gain = float(filters.get('defaultAntennaGain', 2.0))  # 2 dBi default (stock antenna)
         default_hop_limit = int(filters.get('defaultHopLimit', 3))
 
         current_time = time.time()
