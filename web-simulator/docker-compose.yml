@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  web-simulator:
+    build: .
+    container_name: meshtastic-web-simulator
+    ports:
+      - "4000:4000"
+    environment:
+      - PORT=4000
+      - DEBUG=false
+    volumes:
+      # Mount for persistent node configurations
+      - ./data:/app/data
+    restart: unless-stopped
+
+  # Optional: Include meshtasticd for full simulation capability
+  # Uncomment if you want to run full firmware simulations
+  # meshtasticd:
+  #   image: meshtastic/meshtasticd
+  #   container_name: meshtasticd
+  #   ports:
+  #     - "4403:4403"
+  #   volumes:
+  #     - meshtastic-data:/home/
+  #   restart: unless-stopped
+
+# volumes:
+#   meshtastic-data:

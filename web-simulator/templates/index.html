@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Meshtastic Network Simulator</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="app-header">
+            <h1>Meshtastic Network Simulator</h1>
+            <div class="header-actions">
+                <button id="btn-export" class="btn btn-secondary">Export YAML</button>
+                <button id="btn-import" class="btn btn-secondary">Import YAML</button>
+                <button id="btn-clear" class="btn btn-danger">Clear All</button>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <div class="main-content">
+            <!-- Left Panel - Node Configuration -->
+            <aside class="panel panel-left">
+                <div class="panel-section">
+                    <h2>Add Node</h2>
+                    <div class="form-group">
+                        <label for="node-name">Name</label>
+                        <input type="text" id="node-name" placeholder="Node name">
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="node-x">X (m)</label>
+                            <input type="number" id="node-x" value="0" step="100">
+                        </div>
+                        <div class="form-group">
+                            <label for="node-y">Y (m)</label>
+                            <input type="number" id="node-y" value="0" step="100">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="node-height">Height (m)</label>
+                            <input type="number" id="node-height" value="1" step="1" min="0">
+                        </div>
+                        <div class="form-group">
+                            <label for="node-gain">Gain (dBi)</label>
+                            <input type="number" id="node-gain" value="0" step="1">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="node-role">Role</label>
+                        <select id="node-role">
+                            <option value="CLIENT">Client</option>
+                            <option value="CLIENT_MUTE">Client Mute</option>
+                            <option value="ROUTER">Router</option>
+                            <option value="REPEATER">Repeater</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="node-hoplimit">Hop Limit</label>
+                        <input type="range" id="node-hoplimit" min="0" max="7" value="3">
+                        <span id="node-hoplimit-value">3</span>
+                    </div>
+                    <button id="btn-add-node" class="btn btn-primary btn-full">Add Node</button>
+                </div>
+
+                <div class="panel-section">
+                    <h2>Node List (<span id="node-count">0</span>)</h2>
+                    <div id="node-list" class="node-list"></div>
+                </div>
+            </aside>
+
+            <!-- Center - Canvas/Map -->
+            <main class="canvas-container">
+                <div class="canvas-toolbar">
+                    <span>Double-click to add node | Drag node to move | Scroll to zoom | Drag empty space to pan</span>
+                    <div class="zoom-controls">
+                        <button id="btn-zoom-in" class="btn-icon">+</button>
+                        <span id="zoom-level">Z12</span>
+                        <button id="btn-zoom-out" class="btn-icon">-</button>
+                        <button id="btn-fit" class="btn-icon" title="Fit all nodes">Fit</button>
+                    </div>
+                </div>
+                <canvas id="network-canvas"></canvas>
+                <div class="canvas-status">
+                    <span id="cursor-pos">0m, 0m</span>
+                    <span id="canvas-status-text">Map: <a href="https://www.openstreetmap.org/copyright" target="_blank" style="color: #888;">OpenStreetMap</a></span>
+                </div>
+            </main>
+
+            <!-- Right Panel - Simulation & Commands -->
+            <aside class="panel panel-right">
+                <div class="panel-section">
+                    <h2>Simulation Settings</h2>
+                    <div class="form-group">
+                        <label for="pathloss-model">Path Loss Model</label>
+                        <select id="pathloss-model">
+                            <option value="0">Log-distance</option>
+                            <option value="1">Okumura-Hata (small cities)</option>
+                            <option value="2">Okumura-Hata (metro)</option>
+                            <option value="3">Okumura-Hata (suburban)</option>
+                            <option value="4">Okumura-Hata (rural)</option>
+                            <option value="5" selected>3GPP (suburban macro)</option>
+                            <option value="6">3GPP (metro macro)</option>
+                        </select>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="area-width">Area Width (m)</label>
+                            <input type="number" id="area-width" value="10000" step="1000" min="1000">
+                        </div>
+                        <div class="form-group">
+                            <label for="area-height">Area Height (m)</label>
+                            <input type="number" id="area-height" value="10000" step="1000" min="1000">
+                        </div>
+                    </div>
+                    <button id="btn-apply-settings" class="btn btn-secondary btn-full">Apply Settings</button>
+                </div>
+
+                <div class="panel-section">
+                    <h2>Commands</h2>
+                    <div class="command-section">
+                        <h3>Broadcast</h3>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="cmd-broadcast-from">From Node</label>
+                                <select id="cmd-broadcast-from"></select>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label for="cmd-broadcast-text">Message</label>
+                            <input type="text" id="cmd-broadcast-text" placeholder="Enter message">
+                        </div>
+                        <button id="btn-broadcast" class="btn btn-primary btn-full">Send Broadcast</button>
+                    </div>
+
+                    <div class="command-section">
+                        <h3>Direct Message</h3>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="cmd-dm-from">From</label>
+                                <select id="cmd-dm-from"></select>
+                            </div>
+                            <div class="form-group">
+                                <label for="cmd-dm-to">To</label>
+                                <select id="cmd-dm-to"></select>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label for="cmd-dm-text">Message</label>
+                            <input type="text" id="cmd-dm-text" placeholder="Enter message">
+                        </div>
+                        <button id="btn-dm" class="btn btn-primary btn-full">Send DM</button>
+                    </div>
+
+                    <div class="command-section">
+                        <h3>Traceroute</h3>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="cmd-trace-from">From</label>
+                                <select id="cmd-trace-from"></select>
+                            </div>
+                            <div class="form-group">
+                                <label for="cmd-trace-to">To</label>
+                                <select id="cmd-trace-to"></select>
+                            </div>
+                        </div>
+                        <button id="btn-traceroute" class="btn btn-primary btn-full">Run Traceroute</button>
+                    </div>
+                </div>
+
+                <div class="panel-section">
+                    <h2>Link Quality</h2>
+                    <div id="link-info" class="link-info">
+                        <p class="hint">Select two nodes to see link quality</p>
+                    </div>
+                </div>
+            </aside>
+        </div>
+
+        <!-- Footer / Log -->
+        <footer class="app-footer">
+            <div class="log-header">
+                <h3>Message Log</h3>
+                <button id="btn-clear-log" class="btn-icon" title="Clear log">Clear</button>
+            </div>
+            <div id="message-log" class="message-log"></div>
+        </footer>
+    </div>
+
+    <!-- Import Modal -->
+    <div id="import-modal" class="modal hidden">
+        <div class="modal-content">
+            <h2>Import Node Configuration</h2>
+            <textarea id="import-yaml" placeholder="Paste YAML configuration here..."></textarea>
+            <div class="modal-actions">
+                <button id="btn-import-cancel" class="btn btn-secondary">Cancel</button>
+                <button id="btn-import-confirm" class="btn btn-primary">Import</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Node Edit Modal -->
+    <div id="edit-modal" class="modal hidden">
+        <div class="modal-content">
+            <h2>Edit Node <span id="edit-node-id"></span></h2>
+            <div class="form-group">
+                <label for="edit-name">Name</label>
+                <input type="text" id="edit-name">
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="edit-x">X (m)</label>
+                    <input type="number" id="edit-x" step="100">
+                </div>
+                <div class="form-group">
+                    <label for="edit-y">Y (m)</label>
+                    <input type="number" id="edit-y" step="100">
+                </div>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="edit-height">Height (m)</label>
+                    <input type="number" id="edit-height" step="1" min="0">
+                </div>
+                <div class="form-group">
+                    <label for="edit-gain">Gain (dBi)</label>
+                    <input type="number" id="edit-gain" step="1">
+                </div>
+            </div>
+            <div class="form-group">
+                <label for="edit-role">Role</label>
+                <select id="edit-role">
+                    <option value="CLIENT">Client</option>
+                    <option value="CLIENT_MUTE">Client Mute</option>
+                    <option value="ROUTER">Router</option>
+                    <option value="REPEATER">Repeater</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="edit-hoplimit">Hop Limit</label>
+                <input type="range" id="edit-hoplimit" min="0" max="7" value="3">
+                <span id="edit-hoplimit-value">3</span>
+            </div>
+            <div class="modal-actions">
+                <button id="btn-edit-delete" class="btn btn-danger">Delete Node</button>
+                <button id="btn-edit-cancel" class="btn btn-secondary">Cancel</button>
+                <button id="btn-edit-save" class="btn btn-primary">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
