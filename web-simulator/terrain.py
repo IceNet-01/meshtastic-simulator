@@ -77,7 +77,7 @@ def get_elevations_batch(locations: List[Tuple[float, float]]) -> List[Optional[
         response = requests.post(
             ELEVATION_API,
             json={"locations": uncached_locations},
-            timeout=30
+            timeout=10  # Reduced timeout to prevent long hangs
         )
         if response.status_code == 200:
             data = response.json()
@@ -269,9 +269,11 @@ def check_line_of_sight(lat1: float, lon1: float, height1: float,
     # Calculate obstruction loss
     # If clearance_ratio < 0, terrain blocks LOS
     # If 0 < clearance_ratio < 1, partial Fresnel zone obstruction
-    if worst_clearance_ratio >= 1.0:
+    # Handle edge cases where worst_clearance_ratio might be inf
+    if worst_clearance_ratio == float('inf') or worst_clearance_ratio >= 1.0:
         obstruction_loss = 0
         has_los = True
+        worst_clearance_ratio = 1.0 if worst_clearance_ratio == float('inf') else worst_clearance_ratio
     elif worst_clearance_ratio > 0:
         # Partial obstruction - use knife-edge diffraction approximation
         # Loss increases as clearance decreases
@@ -280,20 +282,26 @@ def check_line_of_sight(lat1: float, lon1: float, height1: float,
     else:
         # Full obstruction - significant diffraction loss
         # Knife-edge diffraction model (simplified)
-        obstruction_depth = abs(worst_clearance_ratio)
+        obstruction_depth = min(abs(worst_clearance_ratio), 100)  # Cap depth to avoid extreme values
         obstruction_loss = 6 + 10 * math.log10(1 + obstruction_depth)
         obstruction_loss = min(obstruction_loss, 30)  # Cap at 30 dB
         has_los = False
 
+    # Ensure all values are JSON-safe (no inf/nan)
+    def safe_round(val, digits=2, default=0.0):
+        if val is None or math.isinf(val) or math.isnan(val):
+            return default
+        return round(val, digits)
+
     return {
         "has_los": has_los,
-        "obstruction_loss": round(obstruction_loss, 2),
-        "clearance_ratio": round(worst_clearance_ratio, 3),
+        "obstruction_loss": safe_round(obstruction_loss, 2, 0.0),
+        "clearance_ratio": safe_round(worst_clearance_ratio, 3, 1.0),
         "terrain_profile": terrain_profile,
         "worst_clearance": worst_point,
-        "distance_m": distance_m,
-        "tx_elevation_asl": tx_height_asl,
-        "rx_elevation_asl": rx_height_asl
+        "distance_m": safe_round(distance_m, 1, 0.0),
+        "tx_elevation_asl": safe_round(tx_height_asl, 1, 0.0),
+        "rx_elevation_asl": safe_round(rx_height_asl, 1, 0.0)
     }
 
 

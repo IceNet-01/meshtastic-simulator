@@ -42,7 +42,17 @@ const state = {
         packets: [],  // Moving packet animations
         nodeStates: new Map(),  // Node visual states during animation
         currentHop: 0
-    }
+    },
+
+    // Propagation circles animation state
+    propagationCircles: {
+        enabled: true,  // Toggle for showing propagation circles
+        circles: [],    // Active expanding circles [{nodeId, x, y, startTime, maxRadius, color}]
+        respectTerrain: true  // Whether to fade based on terrain obstructions
+    },
+
+    // Animation speed control (1.0 = normal, 0.5 = slow, 2.0 = fast)
+    animationSpeed: 1.0
 };
 
 // ============== Constants ==============
@@ -360,6 +370,24 @@ function initEventListeners() {
 
     // Settings
     document.getElementById('btn-apply-settings').addEventListener('click', applySettings);
+
+    // Propagation circles toggle
+    document.getElementById('propagation-circles-enabled').addEventListener('change', (e) => {
+        togglePropagationCircles(e.target.checked);
+        // Show/hide terrain-aware option based on main toggle
+        document.getElementById('propagation-terrain-group').style.opacity = e.target.checked ? '1' : '0.5';
+        document.getElementById('propagation-terrain-aware').disabled = !e.target.checked;
+    });
+    document.getElementById('propagation-terrain-aware').addEventListener('change', (e) => {
+        togglePropagationTerrainRespect(e.target.checked);
+    });
+
+    // Animation speed control
+    document.getElementById('animation-speed').addEventListener('input', (e) => {
+        const speed = parseFloat(e.target.value);
+        state.animationSpeed = speed;
+        document.getElementById('animation-speed-value').textContent = speed + 'x';
+    });
 
     // Clear log
     document.getElementById('btn-clear-log').addEventListener('click', () => {
@@ -765,6 +793,13 @@ function render() {
     // Draw links
     drawLinks();
 
+    // Draw propagation circles (behind routes and nodes)
+    try {
+        drawPropagationCirclesWithTerrain();
+    } catch (e) {
+        console.error('Error drawing propagation circles:', e);
+    }
+
     // Draw highlighted route
     if (state.highlightedRoute && state.highlightedRoute.length > 1) {
         drawRoute(state.highlightedRoute);
@@ -781,7 +816,11 @@ function render() {
     }
 
     // Draw animations (packets, indicators)
-    drawAnimations();
+    try {
+        drawAnimations();
+    } catch (e) {
+        console.error('Error drawing animations:', e);
+    }
 
     // Draw scale bar
     drawScaleBar();
@@ -1545,7 +1584,8 @@ function startBroadcastAnimation(simulation) {
         startTime: performance.now(),
         packets: [],
         nodeStates: new Map(),
-        currentHop: 0
+        currentHop: 0,
+        lastPropCircleHop: -1  // Track which hop we last created circles for
     };
 
     // Set initial node states
@@ -1558,6 +1598,11 @@ function startBroadcastAnimation(simulation) {
         });
     });
 
+    // Create initial propagation circle for the source node
+    if (simulation.source !== undefined) {
+        createPropagationCircle(simulation.source, { r: 0, g: 255, b: 255 }); // Cyan for broadcast
+    }
+
     // Render immediately to show initial state, then start animation loop
     render();
     renderLoopRunning = true;
@@ -1568,8 +1613,9 @@ function startBroadcastAnimation(simulation) {
 function animateBroadcast(timestamp) {
     if (!state.animation.active || state.animation.type !== 'broadcast') return;
 
-    const elapsed = timestamp - state.animation.startTime;
-    const hopDuration = 1000; // 1 second per hop
+    try {
+    const elapsed = (timestamp - state.animation.startTime) * state.animationSpeed;
+    const hopDuration = 1000; // 1 second per hop (base speed)
     const currentHop = Math.floor(elapsed / hopDuration);
     const hopProgress = (elapsed % hopDuration) / hopDuration;
 
@@ -1581,6 +1627,19 @@ function animateBroadcast(timestamp) {
 
     if (currentHop < propagation.length) {
         const hopData = propagation[currentHop];
+
+        // Create propagation circles for transmitting nodes at the start of each hop
+        // Use transmitters list if available (includes nodes that transmit even with no new receivers)
+        if (currentHop > state.animation.lastPropCircleHop) {
+            state.animation.lastPropCircleHop = currentHop;
+            const transmittingNodes = hopData.transmitters
+                ? new Set(hopData.transmitters)
+                : new Set(hopData.transmissions.map(tx => tx.from));
+            transmittingNodes.forEach(nodeId => {
+                createPropagationCircle(nodeId, { r: 0, g: 255, b: 255 }); // Cyan for broadcast
+            });
+        }
+
         hopData.transmissions.forEach(tx => {
             const fromNode = getNodeById(tx.from);
             const toNode = getNodeById(tx.to);
@@ -1631,7 +1690,14 @@ function animateBroadcast(timestamp) {
             state.animation.packets = [];
             renderLoopRunning = false;
             render();
+            // Continue rendering if propagation circles are still active
+            continuePropagationCircleAnimation();
         }, 1000);
+    }
+    } catch (e) {
+        console.error('Error in animateBroadcast:', e);
+        state.animation.active = false;
+        renderLoopRunning = false;
     }
 }
 
@@ -1673,6 +1739,14 @@ function startDMAnimation(simulation) {
             });
         }
 
+        // Track last hop for propagation circles
+        state.animation.lastPropCircleHop = -1;
+
+        // Create initial propagation circle for source
+        if (simulation.source !== undefined) {
+            createPropagationCircle(simulation.source, { r: 0, g: 255, b: 0 }); // Green for DM
+        }
+
         // Render immediately to show initial state, then start animation loop
         render();
         renderLoopRunning = true;
@@ -1696,7 +1770,7 @@ function animateDMFlood(timestamp) {
     // DM flood animation - shows message flooding out in all directions
     if (!state.animation.active || state.animation.type !== 'dm') return;
 
-    const elapsed = timestamp - state.animation.startTime;
+    const elapsed = (timestamp - state.animation.startTime) * state.animationSpeed;
     const hopDuration = 1000;
     const currentHop = Math.floor(elapsed / hopDuration);
     const hopProgress = (elapsed % hopDuration) / hopDuration;
@@ -1709,6 +1783,19 @@ function animateDMFlood(timestamp) {
 
     if (currentHop < propagation.length) {
         const hopData = propagation[currentHop];
+
+        // Create propagation circles for transmitting nodes at the start of each hop
+        // Use transmitters list if available (includes nodes that transmit even with no new receivers)
+        if (currentHop > (state.animation.lastPropCircleHop || -1)) {
+            state.animation.lastPropCircleHop = currentHop;
+            const transmittingNodes = hopData.transmitters
+                ? new Set(hopData.transmitters)
+                : new Set(hopData.transmissions.map(tx => tx.from));
+            transmittingNodes.forEach(nodeId => {
+                createPropagationCircle(nodeId, { r: 0, g: 255, b: 0 }); // Green for DM
+            });
+        }
+
         hopData.transmissions.forEach(tx => {
             const fromNode = getNodeById(tx.from);
             const toNode = getNodeById(tx.to);
@@ -1766,6 +1853,8 @@ function animateDMFlood(timestamp) {
             state.highlightedRoute = null;
             renderLoopRunning = false;
             render();
+            // Continue rendering if propagation circles are still active
+            continuePropagationCircleAnimation();
         }, 2000);
     }
 }
@@ -1774,7 +1863,7 @@ function animateDM(timestamp) {
     // Legacy path-based DM animation (fallback)
     if (!state.animation.active || state.animation.type !== 'dm') return;
 
-    const elapsed = timestamp - state.animation.startTime;
+    const elapsed = (timestamp - state.animation.startTime) * state.animationSpeed;
     const simulation = state.animation.data;
     const hops = simulation.hops || [];
     const hopDuration = 800;
@@ -1860,6 +1949,15 @@ function startTracerouteAnimation(simulation) {
                 });
             });
         }
+
+        // Track last hop for propagation circles
+        state.animation.lastPropCircleHop = -1;
+
+        // Create initial propagation circle for source
+        if (simulation.source !== undefined) {
+            createPropagationCircle(simulation.source, { r: 255, g: 255, b: 0 }); // Yellow for traceroute
+        }
+
         // Render immediately to show initial state, then start animation loop
         render();
         renderLoopRunning = true;
@@ -1877,7 +1975,7 @@ function animateTracerouteFlood(timestamp) {
     // Traceroute flood animation - shows message flooding out
     if (!state.animation.active || state.animation.type !== 'traceroute') return;
 
-    const elapsed = timestamp - state.animation.startTime;
+    const elapsed = (timestamp - state.animation.startTime) * state.animationSpeed;
     const hopDuration = 800;
     const currentHop = Math.floor(elapsed / hopDuration);
     const hopProgress = (elapsed % hopDuration) / hopDuration;
@@ -1889,6 +1987,19 @@ function animateTracerouteFlood(timestamp) {
 
     if (currentHop < propagation.length) {
         const hopData = propagation[currentHop];
+
+        // Create propagation circles for transmitting nodes at the start of each hop
+        // Use transmitters list if available (includes nodes that transmit even with no new receivers)
+        if (currentHop > (state.animation.lastPropCircleHop || -1)) {
+            state.animation.lastPropCircleHop = currentHop;
+            const transmittingNodes = hopData.transmitters
+                ? new Set(hopData.transmitters)
+                : new Set(hopData.transmissions.map(tx => tx.from));
+            transmittingNodes.forEach(nodeId => {
+                createPropagationCircle(nodeId, { r: 255, g: 255, b: 0 }); // Yellow for traceroute
+            });
+        }
+
         hopData.transmissions.forEach(tx => {
             const fromNode = getNodeById(tx.from);
             const toNode = getNodeById(tx.to);
@@ -1942,6 +2053,8 @@ function animateTracerouteFlood(timestamp) {
             state.highlightedRoute = null;
             renderLoopRunning = false;
             render();
+            // Continue rendering if propagation circles are still active
+            continuePropagationCircleAnimation();
         }, 3000);
     }
 }
@@ -1950,7 +2063,7 @@ function animateTraceroute(timestamp) {
     // Legacy traceroute animation (fallback)
     if (!state.animation.active || state.animation.type !== 'traceroute') return;
 
-    const elapsed = timestamp - state.animation.startTime;
+    const elapsed = (timestamp - state.animation.startTime) * state.animationSpeed;
     const simulation = state.animation.data;
     const hops = simulation.hops || [];
     const hopDuration = 600;
@@ -2144,6 +2257,277 @@ function drawAnimations() {
             }
         });
     }
+}
+
+// ============== Propagation Circles Animation ==============
+
+/**
+ * Create a new propagation circle when a node transmits.
+ * The circle expands outward from the node and fades with distance.
+ */
+function createPropagationCircle(nodeId, color = null) {
+    if (!state.propagationCircles.enabled) return;
+
+    const node = getNodeById(nodeId);
+    if (!node) return;
+
+    // Use node's coverage radius if available, otherwise use a default
+    const maxRadius = node.coverageRadius || 5000; // Default 5km
+
+    // Determine color based on message type or node role
+    const circleColor = color || getCircleColorForRole(node.role);
+
+    state.propagationCircles.circles.push({
+        nodeId: nodeId,
+        x: node.x,
+        y: node.y,
+        startTime: performance.now(),
+        maxRadius: maxRadius,
+        color: circleColor,
+        duration: 2000 / state.animationSpeed  // 2 second animation at 1x speed
+    });
+}
+
+/**
+ * Get appropriate circle color based on node role.
+ */
+function getCircleColorForRole(role) {
+    const colors = {
+        'CLIENT': { r: 52, g: 152, b: 219 },      // Blue
+        'CLIENT_MUTE': { r: 149, g: 165, b: 166 }, // Gray
+        'ROUTER': { r: 243, g: 156, b: 18 },       // Orange
+        'REPEATER': { r: 46, g: 204, b: 113 }      // Green
+    };
+    return colors[role] || colors['CLIENT'];
+}
+
+/**
+ * Draw all active propagation circles.
+ * Circles expand outward and fade with distance from the node.
+ */
+function drawPropagationCircles() {
+    if (!state.propagationCircles.enabled) return;
+    if (state.propagationCircles.circles.length === 0) return;
+
+    const ctx = state.ctx;
+    const now = performance.now();
+    const mpp = metersPerPixel(state.mapCenter.lat, state.zoomLevel);
+
+    // Filter out expired circles and draw active ones
+    state.propagationCircles.circles = state.propagationCircles.circles.filter(circle => {
+        const elapsed = now - circle.startTime;
+        const progress = elapsed / circle.duration;
+
+        if (progress > 1) return false; // Remove completed circle
+
+        const pos = worldToScreen(circle.x, circle.y);
+
+        // Current radius in meters and pixels
+        const currentRadiusMeters = circle.maxRadius * progress;
+        const currentRadiusPixels = currentRadiusMeters / mpp;
+
+        // Don't draw if too small or too large for current view
+        if (currentRadiusPixels < 5 || currentRadiusPixels > 5000) return true;
+
+        // Draw multiple concentric rings for a ripple effect
+        const numRings = 3;
+        for (let ring = 0; ring < numRings; ring++) {
+            const ringProgress = progress - (ring * 0.1);  // Stagger rings
+            if (ringProgress <= 0 || ringProgress > 1) continue;
+
+            const ringRadius = circle.maxRadius * ringProgress / mpp;
+
+            // Calculate alpha: starts visible, fades as it expands and over time
+            // Fade faster at the outer edges
+            const distanceFade = 1 - ringProgress;  // Fades as circle expands
+            const timeFade = 1 - (ringProgress * 0.5);  // Additional time-based fade
+            const alpha = Math.max(0, distanceFade * timeFade * 0.6);
+
+            if (alpha <= 0.01) continue;
+
+            // Draw the ring
+            ctx.beginPath();
+            ctx.arc(pos.x, pos.y, ringRadius, 0, Math.PI * 2);
+
+            // Create gradient for the ring stroke
+            const { r, g, b } = circle.color;
+            ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${alpha})`;
+            ctx.lineWidth = Math.max(1, 3 - ring);  // Inner rings are thicker
+
+            // Add glow effect for the innermost ring
+            if (ring === 0) {
+                ctx.shadowColor = `rgba(${r}, ${g}, ${b}, ${alpha * 0.5})`;
+                ctx.shadowBlur = 10;
+            } else {
+                ctx.shadowBlur = 0;
+            }
+
+            ctx.stroke();
+        }
+
+        ctx.shadowBlur = 0;
+        return true;  // Keep the circle
+    });
+}
+
+/**
+ * Enhanced propagation circle drawing that respects terrain.
+ * Shows signal attenuation in directions with terrain obstructions.
+ */
+function drawPropagationCirclesWithTerrain() {
+    if (!state.propagationCircles.enabled) return;
+    if (state.propagationCircles.circles.length === 0) return;
+    if (!state.propagationCircles.respectTerrain) {
+        drawPropagationCircles();
+        return;
+    }
+
+    const ctx = state.ctx;
+    const now = performance.now();
+    const mpp = metersPerPixel(state.mapCenter.lat, state.zoomLevel);
+
+    // Get terrain obstructions from link data
+    const obstructedDirections = new Map();  // nodeId -> Set of angles with obstructions
+
+    // Build obstruction map from link quality data
+    state.links.forEach(link => {
+        // If terrain is reducing link quality, mark those directions
+        // Link structure: { source, target, terrain: { hasLos, obstructionLoss, clearanceRatio } }
+        if (link.terrain && link.terrain.obstructionLoss > 0) {
+            // Calculate angle from each node
+            const node1 = getNodeById(link.source);
+            const node2 = getNodeById(link.target);
+            if (node1 && node2) {
+                const angle1 = Math.atan2(node2.y - node1.y, node2.x - node1.x);
+                const angle2 = Math.atan2(node1.y - node2.y, node1.x - node2.x);
+                const loss = link.terrain.obstructionLoss;
+
+                if (!obstructedDirections.has(link.source)) {
+                    obstructedDirections.set(link.source, []);
+                }
+                obstructedDirections.get(link.source).push({ angle: angle1, loss });
+
+                if (!obstructedDirections.has(link.target)) {
+                    obstructedDirections.set(link.target, []);
+                }
+                obstructedDirections.get(link.target).push({ angle: angle2, loss });
+            }
+        }
+    });
+
+    // Draw circles with terrain-aware fading
+    state.propagationCircles.circles = state.propagationCircles.circles.filter(circle => {
+        const elapsed = now - circle.startTime;
+        const progress = elapsed / circle.duration;
+
+        if (progress > 1) return false;
+
+        const pos = worldToScreen(circle.x, circle.y);
+        const currentRadiusMeters = circle.maxRadius * progress;
+        const currentRadiusPixels = currentRadiusMeters / mpp;
+
+        if (currentRadiusPixels < 5 || currentRadiusPixels > 5000) return true;
+
+        const { r, g, b } = circle.color;
+        const obstructions = obstructedDirections.get(circle.nodeId) || [];
+
+        // Draw in segments if we have terrain data, otherwise draw full circle
+        if (obstructions.length > 0 && state.config?.terrainEnabled) {
+            // Draw in 36 segments (10 degrees each)
+            const numSegments = 36;
+            const segmentAngle = (Math.PI * 2) / numSegments;
+
+            for (let seg = 0; seg < numSegments; seg++) {
+                const startAngle = seg * segmentAngle;
+                const endAngle = (seg + 1) * segmentAngle;
+                const midAngle = startAngle + segmentAngle / 2;
+
+                // Check if any obstructions affect this segment
+                let attenuationFactor = 1.0;
+                obstructions.forEach(obs => {
+                    const angleDiff = Math.abs(normalizeAngle(midAngle - obs.angle));
+                    if (angleDiff < Math.PI / 6) {  // Within 30 degrees
+                        // Scale attenuation based on angle proximity and loss amount
+                        const proximity = 1 - (angleDiff / (Math.PI / 6));
+                        const lossFactor = Math.min(1, obs.loss / 20);  // Normalize loss to 0-1
+                        attenuationFactor *= (1 - proximity * lossFactor * 0.7);
+                    }
+                });
+
+                // Draw this segment
+                const distanceFade = 1 - progress;
+                const timeFade = 1 - (progress * 0.5);
+                const alpha = Math.max(0, distanceFade * timeFade * 0.6 * attenuationFactor);
+
+                if (alpha <= 0.01) continue;
+
+                ctx.beginPath();
+                ctx.arc(pos.x, pos.y, currentRadiusPixels, startAngle, endAngle);
+                ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${alpha})`;
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            }
+        } else {
+            // Draw simple circle without terrain segmentation
+            const distanceFade = 1 - progress;
+            const timeFade = 1 - (progress * 0.5);
+            const alpha = Math.max(0, distanceFade * timeFade * 0.6);
+
+            ctx.beginPath();
+            ctx.arc(pos.x, pos.y, currentRadiusPixels, 0, Math.PI * 2);
+            ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${alpha})`;
+            ctx.lineWidth = 2;
+            ctx.shadowColor = `rgba(${r}, ${g}, ${b}, ${alpha * 0.5})`;
+            ctx.shadowBlur = 8;
+            ctx.stroke();
+            ctx.shadowBlur = 0;
+        }
+
+        return true;
+    });
+}
+
+/**
+ * Normalize angle to -PI to PI range.
+ */
+function normalizeAngle(angle) {
+    while (angle > Math.PI) angle -= Math.PI * 2;
+    while (angle < -Math.PI) angle += Math.PI * 2;
+    return angle;
+}
+
+/**
+ * Toggle propagation circles on/off.
+ */
+function togglePropagationCircles(enabled) {
+    state.propagationCircles.enabled = enabled;
+    if (!enabled) {
+        state.propagationCircles.circles = [];
+    }
+    render();
+}
+
+/**
+ * Toggle terrain-aware propagation circles.
+ */
+function togglePropagationTerrainRespect(enabled) {
+    state.propagationCircles.respectTerrain = enabled;
+}
+
+/**
+ * Continue rendering propagation circles after main animation ends.
+ * This ensures circles complete their fade-out animation smoothly.
+ */
+function continuePropagationCircleAnimation() {
+    if (state.propagationCircles.circles.length === 0) return;
+
+    function animateCircles() {
+        render();
+        if (state.propagationCircles.circles.length > 0 && !state.animation.active) {
+            requestAnimationFrame(animateCircles);
+        }
+    }
+    requestAnimationFrame(animateCircles);
 }
 
 // ============== Import/Export ==============

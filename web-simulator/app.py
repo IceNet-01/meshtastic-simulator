@@ -277,24 +277,36 @@ class WebSimulator:
                 )
 
                 terrain_loss = los_result.get('obstruction_loss', 0)
+                # Ensure terrain_loss is a valid number
+                if terrain_loss is None or not isinstance(terrain_loss, (int, float)) or math.isnan(terrain_loss) or math.isinf(terrain_loss):
+                    terrain_loss = 0.0
                 terrain_info = {
                     'hasLos': los_result.get('has_los', True),
-                    'obstructionLoss': terrain_loss,
-                    'clearanceRatio': los_result.get('clearance_ratio', 1.0)
+                    'obstructionLoss': float(terrain_loss),
+                    'clearanceRatio': float(los_result.get('clearance_ratio', 1.0) or 1.0)
                 }
             except Exception as e:
-                logger.warning(f"Terrain check failed: {e}")
+                logger.warning(f"Terrain check failed for nodes {node1.id}->{node2.id}: {e}")
+                terrain_loss = 0.0
 
         path_loss += terrain_loss
         rssi = self.config.PTX + node1.antenna_gain - path_loss
         snr = rssi - self.config.NOISE_LEVEL
         can_receive = bool(rssi >= self.config.SENSMODEM[self.config.MODEM])
 
+        # Helper to ensure valid JSON numbers (no NaN/Infinity)
+        def safe_float(val, default=0.0):
+            if val is None or not isinstance(val, (int, float)):
+                return default
+            if math.isnan(val) or math.isinf(val):
+                return default
+            return float(val)
+
         result = {
-            'distance': float(round(dist, 1)),
-            'pathLoss': float(round(path_loss, 2)),
-            'rssi': float(round(rssi, 2)),
-            'snr': float(round(snr, 2)),
+            'distance': safe_float(round(dist, 1)),
+            'pathLoss': safe_float(round(path_loss, 2)),
+            'rssi': safe_float(round(rssi, 2)),
+            'snr': safe_float(round(snr, 2)),
             'canReceive': can_receive,
             'signalQuality': int(self._rssi_to_quality(rssi)) if can_receive else 0
         }
@@ -1343,6 +1355,7 @@ def simulate_broadcast(from_node: int, hop_limit: int = 3) -> dict:
     while frontier and current_hop < 10:  # Safety limit
         next_frontier = []
         hop_transmissions = []
+        transmitting_nodes = set()  # Track all nodes that transmit this hop
 
         for tx_node_id, remaining_hops in frontier:
             # If remaining hops is 0, this node received but won't rebroadcast
@@ -1350,6 +1363,7 @@ def simulate_broadcast(from_node: int, hop_limit: int = 3) -> dict:
                 continue
 
             tx_node = simulator.nodes[tx_node_id]
+            transmitting_nodes.add(tx_node_id)  # This node is transmitting
 
             # Check which nodes can hear this transmission
             for rx_node_id, rx_node in simulator.nodes.items():
@@ -1387,10 +1401,12 @@ def simulate_broadcast(from_node: int, hop_limit: int = 3) -> dict:
                     if role in ['ROUTER', 'REPEATER', 'CLIENT'] and new_remaining > 0:
                         next_frontier.append((rx_node_id, new_remaining))
 
-        if hop_transmissions:
+        # Record this hop if any nodes transmitted (even if no new receivers)
+        if transmitting_nodes:
             propagation.append({
                 'hop': current_hop + 1,
-                'transmissions': hop_transmissions
+                'transmissions': hop_transmissions,
+                'transmitters': list(transmitting_nodes)  # All nodes that transmitted this hop
             })
 
         frontier = next_frontier

@@ -141,6 +141,34 @@
                             Uses SRTM elevation data for line-of-sight checks. Requires internet.
                         </small>
                     </div>
+                    <div class="form-group">
+                        <label style="display: flex; align-items: center; gap: 8px;">
+                            <input type="checkbox" id="propagation-circles-enabled" checked style="width: auto;">
+                            Show Propagation Circles
+                        </label>
+                        <small style="color: var(--text-secondary); display: block; margin-top: 4px;">
+                            Animated expanding circles when nodes transmit.
+                        </small>
+                    </div>
+                    <div class="form-group" id="propagation-terrain-group">
+                        <label style="display: flex; align-items: center; gap: 8px; margin-left: 20px;">
+                            <input type="checkbox" id="propagation-terrain-aware" checked style="width: auto;">
+                            Terrain-Aware Fading
+                        </label>
+                        <small style="color: var(--text-secondary); display: block; margin-top: 4px; margin-left: 20px;">
+                            Circles fade more in directions with terrain obstructions.
+                        </small>
+                    </div>
+                    <div class="form-group">
+                        <label for="animation-speed">Animation Speed</label>
+                        <div style="display: flex; align-items: center; gap: 10px;">
+                            <input type="range" id="animation-speed" min="0.25" max="3" step="0.25" value="1" style="flex: 1;">
+                            <span id="animation-speed-value" style="min-width: 40px;">1x</span>
+                        </div>
+                        <small style="color: var(--text-secondary); display: block; margin-top: 4px;">
+                            Controls how fast message propagation animations play.
+                        </small>
+                    </div>
                     <div class="form-row">
                         <div class="form-group">
                             <label for="area-width">Area Width (m)</label>
